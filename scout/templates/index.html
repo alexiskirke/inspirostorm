@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scout — Papers &amp; Repos to Avatars</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Scout <span class="muted">→ avatars</span></h1>
+    <p class="lede">
+      Scan a GitHub user or arXiv. Pick up to 3 items. We'll write a prompt for
+      each one and have RunwayML draw a head-and-shoulders avatar that captures
+      its vibe.
+    </p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="tabs" role="tablist">
+        <button class="tab tab--active" data-tab="github" role="tab">GitHub</button>
+        <button class="tab" data-tab="arxiv" role="tab">arXiv</button>
+      </div>
+
+      <form id="form-github" class="scan-form" data-source="github">
+        <label>
+          GitHub username
+          <input name="username" placeholder="e.g. torvalds" required />
+        </label>
+        <label>
+          Language (optional)
+          <input name="language" placeholder="e.g. Python" />
+        </label>
+        <label>
+          Updated within (days)
+          <input name="days" type="number" min="1" max="3650" placeholder="any" />
+        </label>
+        <label>
+          Limit
+          <input name="limit" type="number" min="1" max="100" value="30" />
+        </label>
+        <button type="submit" class="primary">Scan repos</button>
+      </form>
+
+      <form id="form-arxiv" class="scan-form hidden" data-source="arxiv">
+        <label>
+          Query
+          <input name="query" placeholder="e.g. diffusion video" />
+        </label>
+        <label>
+          Categories (comma-separated)
+          <input name="categories" placeholder="cs.AI, cs.CV" />
+        </label>
+        <label>
+          Published within (days)
+          <input name="days" type="number" min="1" max="3650" value="14" />
+        </label>
+        <label>
+          Limit
+          <input name="limit" type="number" min="1" max="100" value="30" />
+        </label>
+        <button type="submit" class="primary">Search arXiv</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="results-header">
+        <h2>Results <span id="results-count" class="muted"></span></h2>
+        <div class="selection-bar">
+          <span id="selected-count">0 / 3 selected</span>
+          <button id="generate-btn" class="primary" disabled>
+            Generate avatars
+          </button>
+        </div>
+      </div>
+      <div id="results" class="results"></div>
+      <div id="empty-hint" class="empty-hint">
+        Run a scan to see results here.
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="results-header">
+        <h2>Generated avatars</h2>
+        <div class="muted small" id="default-meta">
+          Model: <code id="default-model"></code> · Ratio:
+          <code id="default-ratio"></code>
+        </div>
+      </div>
+      <div id="gallery" class="gallery"></div>
+      <div id="gallery-empty" class="empty-hint">
+        No avatars yet. Pick items above and hit <em>Generate avatars</em>.
+      </div>
+    </section>
+  </main>
+
+  <script>
+    window.SCOUT_DEFAULTS = {
+      model: "{{ default_image_model }}",
+      ratio: "{{ default_ratio }}",
+      chat_base_url: "{{ chat_base_url }}",
+    };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
