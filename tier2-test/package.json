@@ -1,0 +1,33 @@
+{
+  "name": "tier2-test",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Standalone testbench for running multiple Runway preset avatars concurrently on tier 2.",
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite"
+  },
+  "dependencies": {
+    "@runwayml/avatars-react": "^0.15.0",
+    "@runwayml/sdk": "^3.21.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.12.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.10"
+  }
+}
