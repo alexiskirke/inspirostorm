@@ -10,9 +10,13 @@
   <header class="topbar">
     <h1>Scout <span class="muted">→ avatars</span></h1>
     <p class="lede">
-      Scan a GitHub user or arXiv. Pick up to 3 items. We'll write a prompt for
-      each one and have RunwayML draw a head-and-shoulders avatar that captures
-      its vibe.
+      Scan a GitHub user, an arXiv query, or upload your own zip / PDF. Pick
+      up to 3 items. We'll write a prompt for each one and have RunwayML draw
+      a head-and-shoulders avatar that captures its vibe — then you can turn
+      any of them into a custom Runway character.
+    </p>
+    <p class="lede">
+      <a href="/brainstorm" class="btn btn--make">Brainstorms →</a>
     </p>
   </header>
 
@@ -21,6 +25,7 @@
       <div class="tabs" role="tablist">
         <button class="tab tab--active" data-tab="github" role="tab">GitHub</button>
         <button class="tab" data-tab="arxiv" role="tab">arXiv</button>
+        <button class="tab" data-tab="upload" role="tab">Upload</button>
       </div>
 
       <form id="form-github" class="scan-form" data-source="github">
@@ -61,6 +66,23 @@
           <input name="limit" type="number" min="1" max="100" value="30" />
         </label>
         <button type="submit" class="primary">Search arXiv</button>
+      </form>
+
+      <form id="form-upload" class="scan-form scan-form--upload hidden"
+            data-source="upload" enctype="multipart/form-data">
+        <label class="span-2">
+          Title (becomes the avatar's source title)
+          <input name="title" placeholder="e.g. Acme Q4 strategy deck" required />
+        </label>
+        <label class="span-2">
+          Description (one or two sentences — feeds the persona prompt)
+          <input name="description" placeholder="What is this and what makes it interesting?" />
+        </label>
+        <label class="span-2">
+          File (.zip of code/text or .pdf, max 50 MB)
+          <input name="file" type="file" accept=".zip,.pdf,application/zip,application/pdf" required />
+        </label>
+        <button type="submit" class="primary">Upload &amp; create source</button>
       </form>
     </section>
 

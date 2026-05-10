@@ -21,10 +21,12 @@ def _default_data_dir() -> Path:
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or _default_data_dir()).resolve()
 IMAGES_DIR = DATA_DIR / "images"
+MOVIES_DIR = DATA_DIR / "movies"
 DB_PATH = DATA_DIR / "scout.db"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+MOVIES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 _LOCK = threading.Lock()
@@ -63,7 +65,86 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_gen_source     ON generations(source_id);
             CREATE INDEX IF NOT EXISTS idx_gen_created_at ON generations(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_gen_status     ON generations(status);
+
+            -- One thread per ordered pair of avatars (a,b). The pair_key
+            -- collapses (a,b) and (b,a) so calling start_session with the
+            -- avatars in either order resolves to the same thread.
+            CREATE TABLE IF NOT EXISTS brainstorm_threads (
+                id                 TEXT PRIMARY KEY,
+                pair_key           TEXT NOT NULL UNIQUE,
+                avatar_a_gen_id    TEXT NOT NULL,
+                avatar_b_gen_id    TEXT NOT NULL,
+                topic_seed         TEXT,
+                created_at         TEXT NOT NULL,
+                last_session_at    TEXT,
+                status             TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_pair    ON brainstorm_threads(pair_key);
+            CREATE INDEX IF NOT EXISTS idx_thread_recent  ON brainstorm_threads(last_session_at DESC);
+
+            -- Each brainstorm session = one meeting where the pair talked.
+            -- Two Runway+meet sessions (one per avatar) live behind a single row.
+            CREATE TABLE IF NOT EXISTS brainstorm_sessions (
+                id                 TEXT PRIMARY KEY,
+                thread_id          TEXT NOT NULL,
+                topic              TEXT,
+                meeting_url        TEXT,
+                meet_session_id_a  TEXT,
+                meet_session_id_b  TEXT,
+                runway_session_id_a TEXT,
+                runway_session_id_b TEXT,
+                started_at         TEXT NOT NULL,
+                ended_at           TEXT,
+                end_reason         TEXT,
+                transcript_a_json  TEXT,
+                transcript_b_json  TEXT,
+                rolling_summary    TEXT,
+                synthesis_id       TEXT,
+                status             TEXT NOT NULL DEFAULT 'live'
+            );
+            CREATE INDEX IF NOT EXISTS idx_brsess_thread  ON brainstorm_sessions(thread_id, started_at DESC);
+
+            -- Per-thread rolling memory blob (one row per thread). Used to
+            -- inject "ongoing brainstorm" context into both avatars'
+            -- personality on the next session.
+            CREATE TABLE IF NOT EXISTS brainstorm_state (
+                thread_id          TEXT PRIMARY KEY,
+                rolling_summary    TEXT,
+                ideas_json         TEXT,
+                summariser_model   TEXT,
+                updated_at         TEXT NOT NULL,
+                version            INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- Big creative outputs (gpt-5.5 thread synthesis + movie pitch).
+            -- Multiple per thread are allowed (re-syntheses, refinements).
+            CREATE TABLE IF NOT EXISTS brainstorm_synthesis (
+                id                 TEXT PRIMARY KEY,
+                thread_id          TEXT NOT NULL,
+                scope              TEXT NOT NULL,           -- 'session' | 'thread'
+                source_session_id  TEXT,
+                text_md            TEXT NOT NULL,
+                movie_pitch        TEXT,
+                ideas_json         TEXT,
+                model_used         TEXT,
+                created_at         TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_syn_thread     ON brainstorm_synthesis(thread_id, created_at DESC);
             """
+        )
+        # Idempotent additions for new movie-generation columns (Phase 7).
+        _ensure_columns(
+            conn,
+            "brainstorm_synthesis",
+            {
+                "movie_status":           "TEXT",     # 'idle' | 'building' | 'ready' | 'failed'
+                "movie_error":            "TEXT",
+                "movie_path":             "TEXT",     # filename under DATA_DIR/movies/
+                "movie_prompt":           "TEXT",     # what we actually sent to Runway
+                "movie_model":            "TEXT",     # 'gen3a_turbo' | 'veo3.1_fast' | ...
+                "movie_runway_task_id":   "TEXT",
+                "movie_created_at":       "TEXT",
+            },
         )
         _ensure_columns(
             conn,
@@ -83,6 +164,16 @@ def init_db() -> None:
                 "kb_doc_count":        "INTEGER",
                 "kb_size_chars":       "INTEGER",
                 "runway_document_ids": "TEXT",  # comma-separated
+
+                # Persona v2 fields (Phase 1 of brainstorming roadmap):
+                # `domain_body` is the LLM-emitted domain section that
+                # gets composed into `personality` at compose time.
+                # `domain_summary` is the third-person briefing other
+                # avatars see when paired with this one.
+                # `weirdness` 0.0..1.0 modulates the OPERATING MODE preamble.
+                "domain_body":         "TEXT",
+                "domain_summary":      "TEXT",
+                "weirdness":           "REAL",
             },
         )
 
@@ -123,8 +214,9 @@ def create_generation(
             INSERT INTO generations (
                 id, source_id, source_type, source_title, source_url, source_meta,
                 prompt, model, ratio, status, created_at,
-                character_name, personality, start_script, voice_preset, readme_excerpt
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                character_name, personality, start_script, voice_preset, readme_excerpt,
+                domain_body, domain_summary, weirdness
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 gen_id,
@@ -143,6 +235,9 @@ def create_generation(
                 identity.get("start_script"),
                 identity.get("voice_preset"),
                 readme_excerpt[:6000] if readme_excerpt else None,
+                identity.get("domain_body"),
+                identity.get("domain_summary"),
+                identity.get("weirdness"),
             ),
         )
     return gen_id

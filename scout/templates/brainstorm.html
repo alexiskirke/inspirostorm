@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scout — Brainstorms</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/brainstorm.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Scout <span class="muted">→ brainstorms</span></h1>
+    <p class="lede">
+      Pair two of your custom avatars in a Zoom and let them brainstorm.
+      Each session is summarised by gpt-5.1 so the next session picks up
+      where they left off; on demand, gpt-5.5 synthesises the whole
+      thread into a deeper idea + movie pitch.
+    </p>
+    <p class="lede">
+      <a href="/" class="btn btn--ghost btn--sm">← gallery</a>
+    </p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="results-header">
+        <h2>New brainstorm</h2>
+        <div class="muted small">
+          Picks two custom avatars (must already have a Runway avatar id).
+        </div>
+      </div>
+      <form id="form-new" class="brainstorm-new">
+        <label>
+          Avatar A
+          <select name="avatar_a_gen_id" required></select>
+        </label>
+        <label>
+          Avatar B
+          <select name="avatar_b_gen_id" required></select>
+        </label>
+        <label class="span-2">
+          Brainstorm guide (optional — what should the conversation produce?)
+          <input name="topic"
+            placeholder="e.g. propose a new web app combining your fields · co-write a 50-word screenplay logline · invent an unconventional research project · design a one-page workflow they could prototype together" />
+        </label>
+        <label class="span-2">
+          Zoom URL (defaults to BRAINSTORM_DEFAULT_MEETING_URL on the server)
+          <input name="meeting_url" placeholder="https://us04web.zoom.us/j/...?pwd=..." />
+        </label>
+        <button type="submit" class="primary">Start brainstorm</button>
+      </form>
+      <div id="new-error" class="error hidden"></div>
+    </section>
+
+    <section class="panel">
+      <div class="results-header">
+        <h2>Threads</h2>
+      </div>
+      <div id="threads" class="threads"></div>
+      <div id="threads-empty" class="empty-hint">
+        No brainstorms yet. Pair two avatars above to get started.
+      </div>
+    </section>
+
+    <section class="panel hidden" id="thread-panel">
+      <div class="results-header">
+        <h2 id="thread-title">Thread</h2>
+        <div class="controls">
+          <button id="thread-refresh" class="btn btn--ghost btn--sm">refresh</button>
+          <button id="thread-synthesise" class="btn btn--make">Synthesise (gpt-5.5)</button>
+        </div>
+      </div>
+      <div id="thread-meta" class="muted small"></div>
+
+      <h3 class="section-h3">Rolling memory (gpt-5.1)</h3>
+      <div id="thread-memory" class="memory-box">
+        <em class="muted">No sessions summarised yet.</em>
+      </div>
+
+      <h3 class="section-h3">Sessions</h3>
+      <div id="thread-sessions"></div>
+
+      <h3 class="section-h3">Syntheses</h3>
+      <div id="thread-synth"></div>
+    </section>
+  </main>
+
+  <script>
+    window.SCOUT_DEFAULTS = {
+      chat_base_url: "{{ chat_base_url }}",
+    };
+  </script>
+  <script src="/static/brainstorm.js"></script>
+</body>
+</html>

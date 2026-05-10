@@ -84,6 +84,19 @@ main {
   .scan-form { grid-template-columns: 1fr 1fr; }
 }
 .scan-form.hidden { display: none; }
+.scan-form--upload {
+  grid-template-columns: 1fr 1fr;
+  align-items: stretch;
+}
+.scan-form--upload .span-2 { grid-column: span 2; }
+.scan-form--upload input[type="file"] {
+  background: var(--panel-2);
+  border: 1px dashed var(--border);
+  color: var(--text);
+  padding: 12px;
+  border-radius: 8px;
+}
+.scan-form--upload button[type="submit"] { justify-self: start; }
 .scan-form label {
   display: flex;
   flex-direction: column;

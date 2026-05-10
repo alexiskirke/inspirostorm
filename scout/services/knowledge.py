@@ -32,7 +32,9 @@ import io
 import logging
 import os
 import re
+import zipfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -406,11 +408,152 @@ def build_arxiv_documents(source: dict) -> list[DocChunk]:
 # ---------------------------------------------------------------------------
 
 
+def build_upload_documents(source: dict) -> list[DocChunk]:
+    """Knowledge docs for a user-uploaded zip or pdf source.
+
+    Reads the file from disk (path lives in ``source.meta.upload_path``)
+    and produces:
+
+      - For zip: an "overview" doc (title + description + first 200 paths)
+        plus per-file docs for whitelisted source files (same key-file
+        regex set used for GitHub repos), each fenced with its extension.
+      - For pdf: an "overview" doc (title + description) plus chunked
+        body text from the parsed PDF.
+    """
+    meta = source.get("meta") or {}
+    kind = meta.get("upload_kind")
+    upload_path = meta.get("upload_path")
+    if not upload_path:
+        return []
+    path = Path(upload_path)
+    if not path.exists():
+        log.warning("upload missing on disk: %s", upload_path)
+        return []
+
+    title = source.get("title") or "Custom upload"
+
+    if kind == "zip":
+        try:
+            data = path.read_bytes()
+        except Exception as e:
+            log.warning("failed to read zip upload %s: %s", path, e)
+            return []
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            return []
+
+        # Build a tree of usable text files from the zip.
+        all_paths: list[str] = []
+        for n in zf.namelist():
+            if n.endswith("/"):
+                continue
+            if _is_zip_path_noisy(n):
+                continue
+            all_paths.append(n)
+        all_paths.sort()
+
+        overview_lines = [
+            f"# {title}",
+            "",
+            (source.get("description") or "(no description)"),
+            "",
+            "## Source metadata",
+            f"- Kind: zip upload",
+            f"- Filename: {meta.get('filename') or '(unknown)'}",
+            f"- File count: {meta.get('file_count', len(all_paths))}",
+            f"- Size: {meta.get('size_bytes', 0)} bytes",
+            "",
+            "## File tree (first 200 paths)",
+            "```",
+            "\n".join(all_paths[:200]),
+            "```",
+        ]
+        docs = _split_into_chunks(f"{title} — overview", "\n".join(overview_lines))
+
+        # Pull the same key files we pull from a GitHub repo. Reuse
+        # KEY_FILE_PATTERNS by checking each match against the basename
+        # AND the full path (zips can have folder prefixes).
+        for relpath in _pick_key_files_from_zip(all_paths, max_files=4):
+            if len(docs) >= MAX_DOCS_PER_AVATAR:
+                break
+            try:
+                with zf.open(relpath) as fh:
+                    body = fh.read(12_000).decode("utf-8", "replace")
+            except Exception:
+                continue
+            if not body.strip():
+                continue
+            ext = relpath.rsplit(".", 1)[-1] if "." in relpath else ""
+            wrapped = (
+                f"# {relpath}\n\nFrom upload `{meta.get('filename') or title}`."
+                f"\n\n```{ext}\n{body}\n```"
+            )
+            docs.extend(_split_into_chunks(f"{title} — {relpath}", wrapped))
+        return docs[:MAX_DOCS_PER_AVATAR]
+
+    if kind == "pdf":
+        try:
+            data = path.read_bytes()
+        except Exception as e:
+            log.warning("failed to read pdf upload %s: %s", path, e)
+            return []
+        body = _extract_pdf_text(data)
+        overview_lines = [
+            f"# {title}",
+            "",
+            (source.get("description") or "(no description)"),
+            "",
+            f"_Source: PDF upload `{meta.get('filename') or 'document.pdf'}`_",
+        ]
+        docs: list[DocChunk] = [
+            DocChunk(name=f"{title} — overview", content="\n".join(overview_lines))
+        ]
+        if body:
+            docs.extend(_split_into_chunks(f"{title} — full text", body))
+        return docs[:MAX_DOCS_PER_AVATAR]
+
+    return []
+
+
+def _is_zip_path_noisy(path: str) -> bool:
+    low = path.lower().rstrip("/")
+    if not low or low.startswith("__macosx/"):
+        return True
+    if any(seg in low for seg in (
+        "node_modules/", ".git/", ".venv/", "venv/", "__pycache__/",
+        "dist/", "build/", "vendor/", ".idea/", ".vscode/",
+    )):
+        return True
+    return _is_noisy_path(path)
+
+
+def _pick_key_files_from_zip(paths: list[str], *, max_files: int) -> list[str]:
+    """Reuse KEY_FILE_PATTERNS but match against the basename so that
+    files inside subdirectories (common in zips of project folders) are
+    still found."""
+    picked: list[str] = []
+    seen: set[str] = set()
+    for pattern in KEY_FILE_PATTERNS:
+        for p in paths:
+            if p in seen:
+                continue
+            base = p.rsplit("/", 1)[-1]
+            if pattern.match(base) or pattern.match(p):
+                picked.append(p)
+                seen.add(p)
+                if len(picked) >= max_files:
+                    return picked
+    return picked
+
+
 def build_documents_for(source: dict, *, readme: str = "") -> list[DocChunk]:
     if source.get("source") == "github":
         return build_github_documents(source, readme=readme)
     if source.get("source") == "arxiv":
         return build_arxiv_documents(source)
+    if source.get("source") == "upload":
+        return build_upload_documents(source)
     return []
 
 

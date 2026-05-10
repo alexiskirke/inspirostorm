@@ -56,30 +56,46 @@ function formToObj(form) {
 
 async function handleScan(form) {
   const src = form.dataset.source;
-  const obj = formToObj(form);
-  if (obj.days) obj.days = Number(obj.days);
-  if (obj.limit) obj.limit = Number(obj.limit);
-  if (src === "arxiv" && obj.categories) {
-    obj.categories = obj.categories
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
   setScanning(form, true);
   try {
-    const res = await fetch(`/api/scan/${src}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(obj),
-    });
+    let res;
+    if (src === "upload") {
+      // multipart — let the browser set the Content-Type with the boundary.
+      const fd = new FormData(form);
+      res = await fetch("/api/scan/upload", { method: "POST", body: fd });
+    } else {
+      const obj = formToObj(form);
+      if (obj.days) obj.days = Number(obj.days);
+      if (obj.limit) obj.limit = Number(obj.limit);
+      if (src === "arxiv" && obj.categories) {
+        obj.categories = obj.categories
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      res = await fetch(`/api/scan/${src}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(obj),
+      });
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       alert(`Scan failed: ${err.detail || res.statusText}`);
       return;
     }
     const data = await res.json();
-    state.results = data.items;
-    state.selected.clear();
+    if (src === "upload") {
+      // Append to (don't replace) so users can stack several uploads
+      // alongside any previous scan results.
+      const seen = new Set(state.results.map((r) => r.id));
+      for (const item of data.items) {
+        if (!seen.has(item.id)) state.results.unshift(item);
+      }
+    } else {
+      state.results = data.items;
+      state.selected.clear();
+    }
     renderResults();
     renderSelectionBar();
   } finally {
@@ -99,6 +115,10 @@ document.getElementById("form-github").addEventListener("submit", (e) => {
   handleScan(e.currentTarget);
 });
 document.getElementById("form-arxiv").addEventListener("submit", (e) => {
+  e.preventDefault();
+  handleScan(e.currentTarget);
+});
+document.getElementById("form-upload").addEventListener("submit", (e) => {
   e.preventDefault();
   handleScan(e.currentTarget);
 });
@@ -145,6 +165,17 @@ function renderResults() {
       if (m.primary_category) meta.appendChild(tag(m.primary_category));
       if (m.published)
         meta.appendChild(tag(`pub ${m.published.slice(0, 10)}`, "tag--gray"));
+    } else if (item.source === "upload") {
+      const m = item.meta || {};
+      if (m.upload_kind) meta.appendChild(tag(m.upload_kind, "tag--orange"));
+      if (typeof m.size_bytes === "number") {
+        const kb = Math.max(1, Math.round(m.size_bytes / 1024));
+        meta.appendChild(tag(`${kb} KB`, "tag--gray"));
+      }
+      if (typeof m.file_count === "number")
+        meta.appendChild(tag(`${m.file_count} files`, "tag--gray"));
+      if (typeof m.text_chars === "number" && m.text_chars > 0)
+        meta.appendChild(tag(`${Math.round(m.text_chars / 1000)}k chars`, "tag--gray"));
     }
 
     if (item.url) {

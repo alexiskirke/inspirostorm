@@ -14,14 +14,27 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 load_dotenv(ROOT.parent / ".env")
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import Request
 from pydantic import BaseModel, Field
 
-from .services import arxiv_scan, avatars, github_scan, images, knowledge, prompts, storage
+from .services import (
+    arxiv_scan,
+    avatars,
+    brainstorm,
+    github_scan,
+    images,
+    knowledge,
+    movie_pipeline,
+    prompts,
+    storage,
+    summariser,
+    synthesis as synthesis_svc,
+    uploads,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -39,6 +52,8 @@ log.info("DATA_DIR = %s", storage.DATA_DIR)
 EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="img")
 AVATAR_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="avatar")
 KB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kb")
+SUMMARISER_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sum")
+MOVIE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="movie")
 
 
 # ----- request/response models ------------------------------------------------
@@ -83,6 +98,15 @@ def index(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/brainstorm", response_class=HTMLResponse)
+def brainstorm_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "brainstorm.html",
+        {"chat_base_url": CHAT_BASE_URL},
+    )
+
+
 @app.post("/api/scan/github")
 def scan_github(req: GithubScanRequest) -> dict:
     try:
@@ -98,6 +122,34 @@ def scan_github(req: GithubScanRequest) -> dict:
         log.exception("github scan failed")
         raise HTTPException(status_code=502, detail=str(e))
     return {"items": results}
+
+
+@app.post("/api/scan/upload")
+async def scan_upload(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    description: str = Form(""),
+) -> dict:
+    """Persist a custom-source upload (.zip or .pdf) and return a single
+    'item' in the same shape as github/arxiv scans, ready to be selected
+    in the gallery and turned into an avatar."""
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+    try:
+        stored = uploads.save_upload(
+            title=title,
+            description=description,
+            filename=file.filename or "upload",
+            content=content,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"items": [stored.source]}
 
 
 @app.post("/api/scan/arxiv")
@@ -124,13 +176,17 @@ def _process_generation(gen_id: str, prompt: str, model: str, ratio: str) -> Non
 
 
 def _readme_for(source: dict) -> str:
-    """Pull a README (or equivalent rich context) for ``source``.
+    """Return rich textual context for the identity-generation LLM call.
 
-    For GitHub: GET /repos/{full_name}/readme. For arXiv: nothing extra
-    needed — the abstract is already the canonical summary and we pass
-    it through as ``description``.
+    - GitHub: fetched README via the GitHub API.
+    - arXiv: nothing extra (the abstract is already in ``description``).
+    - Upload: the ``preview_text`` we precomputed at upload time
+      (README from the zip, or the first ~6k chars of the PDF).
     """
-    if source.get("source") != "github":
+    src = source.get("source")
+    if src == "upload":
+        return source.get("preview_text") or ""
+    if src != "github":
         return ""
     full_name = (source.get("subtitle") or "").strip()
     if not full_name:
@@ -229,6 +285,151 @@ def create_avatar(gen_id: str) -> dict:
     AVATAR_EXECUTOR.submit(avatars.create_avatar_for_generation, gen_id)
     storage.update_generation(gen_id, avatar_status="creating", avatar_error=None)
     return {"status": "creating"}
+
+
+# -----------------------------------------------------------------------------
+# Brainstorm: pair two custom avatars, dispatch to a meeting, persist memory.
+# (Phase 3 of the brainstorm roadmap; UI lives in scout/templates/brainstorm.html.)
+# -----------------------------------------------------------------------------
+
+
+class BrainstormStartBody(BaseModel):
+    avatar_a_gen_id: str
+    avatar_b_gen_id: str
+    meeting_url: Optional[str] = None
+    topic: Optional[str] = None
+
+
+@app.post("/api/brainstorm/start")
+def brainstorm_start(body: BrainstormStartBody) -> dict:
+    """Find-or-create the thread for this pair, then dispatch a session."""
+    try:
+        thread = brainstorm.find_or_create_thread(
+            body.avatar_a_gen_id,
+            body.avatar_b_gen_id,
+            topic_seed=body.topic,
+        )
+        sess = brainstorm.start_session(
+            thread["id"],
+            meeting_url=body.meeting_url,
+            topic=body.topic,
+        )
+    except (LookupError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        log.exception("brainstorm start failed")
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"thread": thread, "session": sess}
+
+
+@app.post("/api/brainstorm/sessions/{session_id}/end")
+def brainstorm_end(session_id: str, reason: str = "manual") -> dict:
+    try:
+        sess = brainstorm.end_session(session_id, reason=reason)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        log.exception("brainstorm end failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    # Fire summariser in background so the HTTP request returns
+    # promptly. Failures are swallowed by summarise_session_safe.
+    SUMMARISER_EXECUTOR.submit(summariser.summarise_session_safe, session_id)
+    return sess
+
+
+@app.post("/api/brainstorm/sessions/{session_id}/summarise")
+def brainstorm_summarise(session_id: str) -> dict:
+    """Manually re-run the gpt-5.1 summariser on an already-ended session."""
+    try:
+        return summariser.summarise_session(session_id) or {}
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        log.exception("brainstorm summarise failed")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/brainstorm/threads")
+def brainstorm_threads() -> dict:
+    return {"items": brainstorm.list_threads()}
+
+
+@app.get("/api/brainstorm/threads/{thread_id}")
+def brainstorm_thread(thread_id: str) -> dict:
+    th = brainstorm.get_thread(thread_id)
+    if not th:
+        raise HTTPException(status_code=404, detail="thread not found")
+    return {
+        "thread": th,
+        "state": brainstorm.get_thread_state(thread_id),
+        "sessions": brainstorm.list_sessions(thread_id),
+    }
+
+
+@app.get("/api/brainstorm/sessions/{session_id}")
+def brainstorm_session(session_id: str) -> dict:
+    s = brainstorm.get_session(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+    return s
+
+
+@app.post("/api/brainstorm/threads/{thread_id}/synthesise")
+def brainstorm_synthesise(thread_id: str) -> dict:
+    """Run gpt-5.5 synthesis across the whole thread. Returns the new
+    synthesis row (text_md, movie_pitch, ideas)."""
+    try:
+        return synthesis_svc.synthesise_thread(thread_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        log.exception("synthesis failed")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/brainstorm/threads/{thread_id}/synthesis")
+def brainstorm_synthesis_list(thread_id: str) -> dict:
+    return {"items": synthesis_svc.list_synthesis(thread_id)}
+
+
+@app.post("/api/brainstorm/synthesis/{synth_id}/movie")
+def brainstorm_synth_movie(synth_id: str) -> dict:
+    """Kick off the 3-clip movie pipeline for a synthesis row in the
+    background. UI polls /api/brainstorm/threads/<thread_id>/synthesis
+    until movie_status flips to 'ready' (or 'failed') and a movie_path
+    appears."""
+    rec = storage.get_generation  # just confirms storage import is live
+    with storage._connect() as conn:
+        row = conn.execute(
+            "SELECT thread_id, movie_status FROM brainstorm_synthesis WHERE id = ?",
+            (synth_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="synthesis not found")
+    if row["movie_status"] == "building":
+        return {"status": "building"}
+    storage._connect().close()
+    with storage._LOCK, storage._connect() as conn:
+        conn.execute(
+            "UPDATE brainstorm_synthesis SET movie_status='building', movie_error=NULL WHERE id = ?",
+            (synth_id,),
+        )
+    MOVIE_EXECUTOR.submit(movie_pipeline.make_movie_for_synthesis_safe, synth_id)
+    return {"status": "building"}
+
+
+@app.get("/data/movies/{filename}")
+def serve_movie(filename: str) -> FileResponse:
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid filename")
+    path = storage.MOVIES_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="movie not found")
+    return FileResponse(path, media_type="video/mp4")
 
 
 @app.post("/api/generations/{gen_id}/knowledge")

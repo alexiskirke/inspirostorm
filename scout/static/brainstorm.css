@@ -1,0 +1,195 @@
+.brainstorm-new {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: end;
+}
+.brainstorm-new label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+  color: var(--muted);
+  gap: 4px;
+}
+.brainstorm-new input,
+.brainstorm-new select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px;
+  border-radius: 8px;
+  font: inherit;
+}
+.brainstorm-new .span-2 { grid-column: span 2; }
+.brainstorm-new button[type="submit"] { grid-column: span 2; justify-self: start; }
+
+.threads {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.thread-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease;
+}
+.thread-card:hover { border-color: var(--accent); }
+.thread-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(168,85,247,0.35); }
+.thread-card__pair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.thread-card__avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #06060c;
+}
+.thread-card__vs {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.thread-card__name { font-weight: 600; font-size: 0.85rem; }
+.thread-card__meta { color: var(--muted); font-size: 0.75rem; }
+
+.section-h3 {
+  font-size: 0.95rem;
+  margin: 18px 0 8px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.memory-box {
+  background: rgba(168, 85, 247, 0.06);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: #e2e2f0;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.session-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.session-card__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.session-card__title { font-weight: 600; font-size: 0.9rem; }
+.session-card__meta { color: var(--muted); font-size: 0.75rem; }
+.session-card__transcript {
+  margin-top: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.synth-card {
+  background: rgba(34, 211, 238, 0.06);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.synth-card__pitch {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #67e8f9;
+  margin-bottom: 8px;
+}
+.synth-card__text {
+  font-size: 0.88rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.synth-card__meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-top: 8px;
+}
+.synth-card__ideas {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.synth-card__idea {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+}
+.synth-card__idea b { color: var(--text); }
+.synth-card__idea em { color: var(--muted); }
+
+.error.hidden { display: none; }
+.hidden { display: none; }
+
+.synth-card__movie {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.synth-card__video {
+  width: 100%;
+  max-width: 720px;
+  border-radius: 10px;
+  background: #000;
+}
+.synth-card__movie-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.synth-card__movie-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  width: fit-content;
+}
+.synth-card__movie-pill--building {
+  background: rgba(168, 85, 247, 0.13);
+  color: #d8b4ff;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+.synth-card__movie-pill--failed {
+  background: rgba(255, 90, 79, 0.13);
+  color: #fda4af;
+  border: 1px solid rgba(255, 90, 79, 0.35);
+}
