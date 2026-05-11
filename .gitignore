@@ -2,8 +2,27 @@ venv/
 .env
 __pycache__/
 *.pyc
+*.mp4
+*.mov
+
+# Editor / OS junk
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Word lockfiles
+~$*
+
+# Node
+node_modules/
+dist/
+*.log
+
+# Scout local data (sqlite + generated images)
+scout/data/
+
+# Local notes (not for publishing)
 design1.txt
 design2.txt
 Ideas.docx
-*.mp4
-*.mov
