@@ -279,6 +279,19 @@ button.primary:not(:disabled):active { transform: scale(0.98); }
   margin-top: 2px;
 }
 .gen__source-link:hover { text-decoration: underline; }
+.gen__footer {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border, rgba(0,0,0,0.08));
+  display: flex;
+  justify-content: flex-end;
+}
+.gen__delete {
+  opacity: 0.55;
+  color: var(--red, #b00020);
+}
+.gen__delete:hover { opacity: 1; }
+.gen__delete[disabled] { opacity: 0.4; }
 .btn {
   display: inline-flex;
   align-items: center;

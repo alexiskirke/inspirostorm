@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Single command to bring up the full Scout dev stack.
+#
+# Starts three concurrent processes with prefixed colored output:
+#   [scout]    FastAPI app (port 8000)             — scout/main.py via uvicorn
+#   [watchdog] tunnel watchdog (manages meet + cloudflared)
+#   [app]      React avatar chat (port 5173)       — destination of "Chat live →"
+#
+# Ctrl-C terminates everything (the watchdog cleans up meet + cloudflared
+# on its own SIGTERM handler).
+#
+# Usage:
+#   ./run              # start all three
+#   ./run --no-app     # skip the React avatar app
+#   ./run --scout-only # just the FastAPI server (no meet/tunnel, brainstorm won't work)
+
+set -uo pipefail
+
+# ----- resolve project root regardless of cwd -----
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+# ----- flags -----
+RUN_APP=1
+RUN_WATCHDOG=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-app)      RUN_APP=0 ;;
+    --scout-only)  RUN_APP=0; RUN_WATCHDOG=0 ;;
+    -h|--help)
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *)
+      echo "unknown flag: $arg" >&2
+      exit 2 ;;
+  esac
+done
+
+# ----- prerequisite checks -----
+fail() { echo "✗ $1" >&2; exit 1; }
+[[ -d "$ROOT/venv" ]] || fail "missing $ROOT/venv (create it with: python3 -m venv venv && venv/bin/pip install -r scout/requirements.txt)"
+[[ -x "$ROOT/venv/bin/uvicorn" ]] || fail "uvicorn not in venv (run: venv/bin/pip install -r scout/requirements.txt)"
+[[ -f "$ROOT/.env" ]] || echo "⚠ no root .env — scout will start but API calls will fail" >&2
+if [[ $RUN_WATCHDOG -eq 1 ]]; then
+  [[ -d "$ROOT/meet/node_modules" ]] || fail "missing meet/node_modules (run: cd meet && npm install)"
+fi
+if [[ $RUN_APP -eq 1 ]]; then
+  [[ -d "$ROOT/app/node_modules" ]] || fail "missing app/node_modules (run: cd app && npm install)"
+fi
+
+# ----- output prefixing (colored, line-flushed) -----
+# Each process's stdout/stderr flows through awk which tags every line.
+# fflush() keeps macOS awk from buffering the output.
+prefix() {
+  local label="$1" color="$2"
+  awk -v p="$(printf '\033[%sm[%s]\033[0m' "$color" "$label")" '{ print p, $0; fflush() }'
+}
+
+# ----- cleanup on exit -----
+PIDS=()
+cleanup() {
+  echo
+  echo "→ shutting down…"
+  for pid in "${PIDS[@]:-}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  # Give children a moment to clean up their grandchildren (watchdog
+  # needs to SIGTERM meet + cloudflared).
+  sleep 1
+  for pid in "${PIDS[@]:-}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+  echo "→ done."
+}
+trap cleanup EXIT INT TERM
+
+# ----- launch scout (uvicorn) -----
+echo "→ starting scout FastAPI on :8000"
+( "$ROOT/venv/bin/uvicorn" scout.main:app --host 127.0.0.1 --port 8000 --reload 2>&1 \
+  | prefix "scout" 32 ) &
+PIDS+=($!)
+
+# ----- launch tunnel watchdog (which spawns meet + cloudflared) -----
+if [[ $RUN_WATCHDOG -eq 1 ]]; then
+  echo "→ starting tunnel watchdog (manages meet :3000 + cloudflared)"
+  ( "$ROOT/venv/bin/python" -m scout.scripts.tunnel_watchdog 2>&1 \
+    | prefix "watchdog" 33 ) &
+  PIDS+=($!)
+fi
+
+# ----- launch app/ React server -----
+if [[ $RUN_APP -eq 1 ]]; then
+  echo "→ starting app/ React avatar chat on :5173"
+  ( cd "$ROOT/app" && npm run dev 2>&1 | prefix "app" 36 ) &
+  PIDS+=($!)
+fi
+
+echo
+echo "✓ stack up. Hit Ctrl-C to stop everything."
+echo "  • Scout UI:        http://localhost:8000/"
+echo "  • Brainstorm UI:   http://localhost:8000/brainstorm"
+[[ $RUN_APP -eq 1 ]] && echo "  • Avatar chat:     http://localhost:5173/"
+echo
+
+# Wait for any child to exit; the EXIT trap takes care of the rest.
+wait -n

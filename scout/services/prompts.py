@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 from typing import Optional
 
@@ -44,22 +45,104 @@ FALLBACK_MODELS = ["gpt-5", "gpt-4.1", "gpt-4o", "gpt-4o-mini"]
 # catalog is wider; we constrain it so the model picks something we know is
 # valid and so we can describe each option clearly.
 VOICE_OPTIONS: list[dict[str, str]] = [
-    {"id": "victoria", "vibe": "warm, articulate, mid-30s feminine; great for teachers and explainers"},
-    {"id": "clara",    "vibe": "bright, friendly, youthful feminine; curious and upbeat"},
-    {"id": "luna",     "vibe": "soft, dreamy feminine; storyteller / artistic mood"},
-    {"id": "ruby",     "vibe": "confident, sharp feminine; analyst or strategist"},
-    {"id": "aurora",   "vibe": "calm, contemplative feminine; researcher / scholar"},
-    {"id": "vincent",  "vibe": "calm, low, mature masculine; thoughtful mentor"},
-    {"id": "max",      "vibe": "energetic, witty masculine; hacker / builder energy"},
-    {"id": "felix",    "vibe": "warm, conversational masculine; friendly engineer"},
-    {"id": "marcus",   "vibe": "deep, deliberate masculine; gravitas, philosopher"},
-    {"id": "jasper",   "vibe": "playful, theatrical masculine; storyteller"},
-    {"id": "morgan",   "vibe": "neutral, smooth, professional; consultant tone"},
-    {"id": "sam",      "vibe": "neutral, easygoing; everyman developer"},
+    {"id": "victoria", "gender": "feminine",  "vibe": "warm, articulate, mid-30s feminine; great for teachers and explainers"},
+    {"id": "clara",    "gender": "feminine",  "vibe": "bright, friendly, youthful feminine; curious and upbeat"},
+    {"id": "luna",     "gender": "feminine",  "vibe": "soft, dreamy feminine; storyteller / artistic mood"},
+    {"id": "ruby",     "gender": "feminine",  "vibe": "confident, sharp feminine; analyst or strategist"},
+    {"id": "aurora",   "gender": "feminine",  "vibe": "calm, contemplative feminine; researcher / scholar"},
+    {"id": "vincent",  "gender": "masculine", "vibe": "calm, low, mature masculine; thoughtful mentor"},
+    {"id": "max",      "gender": "masculine", "vibe": "energetic, witty masculine; hacker / builder energy"},
+    {"id": "felix",    "gender": "masculine", "vibe": "warm, conversational masculine; friendly engineer"},
+    {"id": "marcus",   "gender": "masculine", "vibe": "deep, deliberate masculine; gravitas, philosopher"},
+    {"id": "jasper",   "gender": "masculine", "vibe": "playful, theatrical masculine; storyteller"},
+    {"id": "morgan",   "gender": "neutral",   "vibe": "neutral, smooth, professional; consultant tone"},
+    {"id": "sam",      "gender": "neutral",   "vibe": "neutral, easygoing; everyman developer"},
 ]
 
-VOICE_LIST_TEXT = "\n".join(f"- {v['id']}: {v['vibe']}" for v in VOICE_OPTIONS)
+VOICE_LIST_TEXT = "\n".join(f"- {v['id']} [{v['gender']}]: {v['vibe']}" for v in VOICE_OPTIONS)
 VALID_VOICE_IDS = {v["id"] for v in VOICE_OPTIONS}
+VOICE_BY_ID: dict[str, dict] = {v["id"]: v for v in VOICE_OPTIONS}
+
+
+def voices_for_gender(gender: str, *, exclude: Optional[set[str]] = None) -> list[str]:
+    """Return voice ids matching ``gender`` (``feminine``/``masculine``/
+    ``neutral``), with any ``exclude`` ids removed. Neutral voices count
+    as a fallback for both feminine and masculine if the gender-specific
+    bucket is empty after exclusion."""
+    exclude = exclude or set()
+    primary = [v["id"] for v in VOICE_OPTIONS if v["gender"] == gender and v["id"] not in exclude]
+    if primary:
+        return primary
+    return [v["id"] for v in VOICE_OPTIONS if v["gender"] == "neutral" and v["id"] not in exclude]
+
+
+# ---------------------------------------------------------------------------
+# Image-style + subject-category palettes
+# ---------------------------------------------------------------------------
+# When the source skews technical, GPT-5.2 by default produces avatars
+# that are visually samey: hooded coders, cyberpunk neon, robot mascots,
+# monitor-glow. To force visual diversity across a batch of avatars, we
+# pick a random STYLE + SUBJECT CATEGORY at call time and pass them in
+# as a "STYLE DIRECTIVE" the model must honor. The persona's domain
+# still derives from the source; only the visual treatment is randomized.
+
+IMAGE_STYLE_PALETTE: list[str] = [
+    "Studio Ghibli-inspired hand-painted animation, soft daylight, warm earth tones",
+    "Renaissance oil painting with strong chiaroscuro and a dark background",
+    "Art Nouveau botanical illustration framed by stylised vines and flowers",
+    "Vintage pulp comic book inking with halftone shading and a limited palette",
+    "Japanese ukiyo-e woodblock print, flat color planes, bold outlines",
+    "Loose watercolor portrait with bleeding edges and visible paper texture",
+    "Charcoal sketch on cream paper, smudged shading, expressive hatching",
+    "Mid-century modern poster art, bold geometric shapes, three-color palette",
+    "Russian Orthodox icon painting with gold-leaf halo and stylised features",
+    "Tarot card illustration with mystic symbolism in the framing border",
+    "Soft pastel children's book illustration with rounded shapes and chalky texture",
+    "1970s sci-fi paperback cover art, airbrushed gradients, pulpy color",
+    "Mexican folk-art / Día de los Muertos motifs with bright marigold accents",
+    "Persian miniature painting style, fine detail, jewel tones",
+    "German expressionist oil painting, distorted features, thick visible brushstrokes",
+    "Steampunk Victorian engraving with brass instruments and copper-tone framing",
+    "Sumi-e brush painting, monochrome ink wash on rice paper, minimal lines",
+    "Pop-art comic style with Ben-Day dots and primary-color blocks",
+    "Vintage botanical / scientific illustration plate with fine inked detail",
+    "Byzantine mosaic with small square tesserae and gilded background",
+    "Stained-glass window portrait with leaded segments and jewel colors",
+    "Claymation puppet aesthetic — visible thumb-prints, slightly imperfect proportions",
+    "Cubist portrait, fragmented planes, muted ochre and grey",
+    "Pre-Raphaelite oil painting, idealised features, draped fabrics, lush florals",
+    "Surrealist dreamscape (Dalí-adjacent) with soft melting forms behind the figure",
+    "Bauhaus poster style, primary colors, strict geometric composition",
+    "Manga ink with detailed crosshatching, no color, screentone backgrounds",
+    "Low-poly 3D render with flat-shaded triangular facets in a candy palette",
+    "Ancient Egyptian tomb-wall painting, profile-style stylisation, hieroglyph border",
+    "Picture-book gouache with thick opaque paint and chunky brush marks",
+]
+
+# Subject-category bias. The avatar's *kind* of being. Tilted away from
+# the cyberpunk-robot default so we get foxes and lantern-people too.
+IMAGE_SUBJECT_CATEGORIES: list[dict[str, str]] = [
+    {"name": "human", "hint": "a human person, can be any age/gender/ethnicity/era of dress, facing camera, mouth clearly visible"},
+    {"name": "anthropomorphic animal", "hint": "an animal with human-like upper body (fox, owl, octopus, raven, fennec, axolotl, pangolin, etc.), front-facing portrait, mouth/beak/snout clearly visible and lip-sync-ready"},
+    {"name": "mythical creature", "hint": "a being from folklore (kitsune, golem, sphinx, fae, gargoyle, naga, kobold, selkie), facing camera, mouth clearly visible"},
+    {"name": "stylised object-being", "hint": "an everyday object given a face and shoulders (a lantern-person, a teapot-person, a book-being, a clock-faced figure). MUST have a clear painted/etched/sculpted MOUTH on the front-facing surface — lip-sync requires it"},
+    {"name": "automaton / clockwork being", "hint": "an old-world mechanical being — pocket-watch automaton, Victorian wind-up, baroque mechanical pageant figure. NOT modern robots / cyberpunk. Front-facing, with an articulated or painted mouth (shutter, aperture, hinged jaw all OK)"},
+    {"name": "spirit / ethereal being", "hint": "a glowing or translucent presence with a clear front-facing face and shoulders, not horror-coded. The face must be SOLID enough for an unambiguous mouth to read — translucent body OK, foggy face NOT OK"},
+    {"name": "plant-being", "hint": "a being formed of plants — mushroom-person, flower-headed figure, tree-spirit. The face (with eyes AND a clear mouth) must sit on the front of the cap/blossom/trunk facing the camera"},
+]
+
+
+def pick_image_style(seed: Optional[int] = None) -> dict:
+    """Return a randomly chosen ``{"style": ..., "subject_category": ...,
+    "subject_hint": ...}``. Pass ``seed`` for reproducible test output."""
+    rng = random.Random(seed) if seed is not None else random
+    style = rng.choice(IMAGE_STYLE_PALETTE)
+    cat = rng.choice(IMAGE_SUBJECT_CATEGORIES)
+    return {
+        "style": style,
+        "subject_category": cat["name"],
+        "subject_hint": cat["hint"],
+    }
 
 SYSTEM_PROMPT = f"""You are a casting director and art director for a
 small studio that turns software projects, research papers and uploaded
@@ -73,12 +156,89 @@ You must return ONLY a single JSON object with these keys:
 
   image_prompt    string   A RunwayML text-to-image prompt for a
                            head-and-shoulders portrait. 2-4 sentences.
-                           Single subject (human, animal, robot, mythical
-                           creature, or stylised object with a face),
-                           facing camera, with a simple blurred backdrop
+                           Single subject with a simple blurred backdrop
                            subtly hinting at the project's domain. No
                            text, no logos, no real-person likeness, no
                            trademarked characters.
+
+                           AVATAR HARD REQUIREMENTS (the image is the
+                           reference frame for a talking avatar — these
+                           rules are non-negotiable, lip-sync breaks
+                           without them):
+
+                           - The subject MUST be facing the camera
+                             straight-on. Front-facing, both eyes
+                             clearly visible. No 3/4 angle, no profile,
+                             no looking away, no looking down, no over-
+                             the-shoulder shots. Phrase this explicitly
+                             in the image_prompt (e.g. "facing camera
+                             straight-on, frontal portrait, eyes meeting
+                             the viewer").
+                           - The subject MUST have a clearly visible
+                             mouth in a neutral or softly closed
+                             position. The mouth is what gets animated
+                             when the avatar speaks; without one the
+                             avatar can't lip-sync. Mention the mouth
+                             explicitly in the image_prompt.
+                           - This applies to EVERY subject category —
+                             including stylised objects, plants,
+                             spirits and clockwork beings. A lantern-
+                             person needs a face with a mouth on the
+                             lamp head. A mushroom-person needs a face
+                             with a mouth on the cap. A spirit needs a
+                             solid-enough face for the mouth to read.
+                             If the subject category genuinely can't
+                             have a mouth, give it an obvious mouth-
+                             analogue (e.g. a shutter or aperture that
+                             reads as a mouth) and SAY SO in the prompt.
+                           - The mouth must NOT be obscured by hands,
+                             masks, helmets, scarves over the lower
+                             face, oxygen masks, etc. The avatar's
+                             apparent gender, age, expression are all
+                             free; the mouth's visibility is not.
+
+                           VISUAL DIVERSITY (this is critical — most
+                           inputs are technical and the default avatar
+                           ends up being yet another hooded coder or
+                           neon-glow robot, which makes a batch of
+                           avatars look like the same person):
+
+                           - The user message includes a STYLE
+                             DIRECTIVE with a specific VISUAL STYLE and
+                             SUBJECT CATEGORY. The image_prompt MUST be
+                             written in that style and the subject MUST
+                             belong to that category. Do not substitute
+                             your own choice.
+                           - Within the directive, weave concrete
+                             objects, garments, or environmental hints
+                             from THIS SOURCE'S domain — those are what
+                             keep the avatar tied to its project.
+                           - Example: source is a Rust compiler repo,
+                             directive style is "Russian Orthodox icon
+                             painting, gold leaf", subject is
+                             "anthropomorphic animal". The image_prompt
+                             should describe e.g. a bear in gilded
+                             monastic robes, with a small set of tiny
+                             gears and circuit-traces etched into the
+                             halo as the domain hint — NOT a hooded
+                             coder, NOT a robot, NOT cyberpunk neon.
+
+                           HARD VISUAL TROPE BAN — never appear in the
+                           image_prompt regardless of how technical the
+                           source is, unless the STYLE DIRECTIVE itself
+                           explicitly names one:
+                             - hooded figures, especially staring at
+                               laptops or screens
+                             - cyberpunk neon glow / blade-runner
+                               aesthetics
+                             - holographic UI panels floating around
+                               the subject
+                             - generic chrome robots / AI mascots
+                             - monitor-glow lighting on the face
+                             - "person in a server room" backdrops
+                           The directive can override these (e.g. if it
+                           says "cyberpunk anime style") — but if it
+                           doesn't, treat them as banned.
   character_name  string   2-4 words. Memorable, readable. Not the
                            project's literal name; an evocative persona
                            name (e.g. "Tess the Token Tinker").
@@ -123,17 +283,33 @@ You must return ONLY a single JSON object with these keys:
                            working on", "how can I help", "what do you
                            need from me" are BANNED — they collapse
                            the conversation into service mode.
-  voice_preset    string   Exactly one id from the catalog below. Pick
-                           the voice whose vibe most fits the persona.
+  voice_preset    string   Exactly one id from the catalog in the user
+                           message (the catalog there is filtered for
+                           this call — voices already taken in this
+                           batch are removed).
 
-Voice catalog:
-{VOICE_LIST_TEXT}
+                           VOICE GENDER MUST MATCH CHARACTER GENDER:
+                           - feminine-presenting character → a voice
+                             tagged [feminine] (or [neutral] only as
+                             a fallback)
+                           - masculine-presenting character → a voice
+                             tagged [masculine] (or [neutral] only as
+                             a fallback)
+                           - non-binary / ambiguous / non-human
+                             character with no clear gender (animals,
+                             objects, abstract beings) → either a
+                             [neutral] voice OR the gender that fits
+                             the persona's energy
+                           Never give a feminine character a
+                           [masculine] voice or vice versa.
 
 Hard rules:
 - Output a single JSON object. No prose before or after. No markdown
   fences. No comments inside the JSON.
 - Use double quotes for strings. Escape newlines inside strings as \\n.
-- voice_preset MUST be one of the listed ids.
+- voice_preset MUST be one of the ids listed in the user message's
+  voice catalog (do NOT pick an id that isn't listed there — those
+  are already taken in this batch).
 - Keep everything safe-for-work and inclusive.
 """
 
@@ -271,6 +447,15 @@ Title: {title}
 Short description:
 {description}
 {readme_block}
+STYLE DIRECTIVE (must be honored in image_prompt — see system rules):
+  VISUAL STYLE     : {style}
+  SUBJECT CATEGORY : {subject_category} — {subject_hint}
+
+VOICE CATALOG (pick one id from THIS LIST only — voices already taken
+in this batch have been removed; gender tag MUST match the character's
+apparent gender per system rules):
+{voice_catalog}
+
 Now produce the JSON identity package."""
 
 
@@ -281,7 +466,13 @@ def _client() -> OpenAI:
     return OpenAI(api_key=api_key)
 
 
-def _format_user_prompt(source: dict, *, readme: str = "") -> str:
+def _format_user_prompt(
+    source: dict,
+    *,
+    readme: str = "",
+    image_style: Optional[dict] = None,
+    excluded_voice_ids: Optional[set[str]] = None,
+) -> str:
     description = (source.get("description") or "").strip()
     if len(description) > 2400:
         description = description[:2400] + " …"
@@ -304,12 +495,32 @@ def _format_user_prompt(source: dict, *, readme: str = "") -> str:
     if readme.strip():
         readme_block = f"\nREADME (truncated to a few thousand chars):\n{readme.strip()}\n"
 
+    style = image_style or pick_image_style()
+
+    excluded = excluded_voice_ids or set()
+    # If exclusion would remove EVERY voice in a gender bucket we just
+    # leave it — the model will fall back to the remaining gender or
+    # neutral, and reassign-on-create (Layer 2) is the safety net.
+    available = [v for v in VOICE_OPTIONS if v["id"] not in excluded]
+    if not available:
+        # Pathological: every voice excluded. Don't silently produce an
+        # empty catalog (which would break the model); fall back to the
+        # full list and let Layer 2 disambiguate.
+        available = list(VOICE_OPTIONS)
+    voice_catalog = "\n".join(
+        f"- {v['id']} [{v['gender']}]: {v['vibe']}" for v in available
+    )
+
     return USER_TEMPLATE.format(
         source_type=source.get("source", "project"),
         title=source.get("title", "Untitled"),
         extra="\n".join(extra_lines),
         description=description or "(no description provided)",
         readme_block=readme_block,
+        style=style["style"],
+        subject_category=style["subject_category"],
+        subject_hint=style["subject_hint"],
+        voice_catalog=voice_catalog,
     )
 
 
@@ -357,6 +568,9 @@ def generate_identity(
     readme: str = "",
     weirdness: float = 0.33,
     model: Optional[str] = None,
+    image_style: Optional[dict] = None,
+    image_style_seed: Optional[int] = None,
+    excluded_voice_ids: Optional[set[str]] = None,
 ) -> dict:
     """Return a complete avatar identity package for ``source``.
 
@@ -364,9 +578,23 @@ def generate_identity(
     LLM (``domain_body``, ``domain_summary``, etc.) and a ready-to-use
     composed ``personality`` string (OPERATING MODE + DOMAIN, no
     partner/memory) for immediate avatar creation.
+
+    Visual diversity: at call time we pick a random STYLE + SUBJECT
+    CATEGORY from the curated palettes and inject them as a STYLE
+    DIRECTIVE into the user message. Pass ``image_style`` to force a
+    specific {style, subject_category, subject_hint} dict, or
+    ``image_style_seed`` to reproduce a particular roll.
     """
     client = _client()
-    user_msg = _format_user_prompt(source, readme=readme)
+    if image_style is None:
+        image_style = pick_image_style(seed=image_style_seed)
+    excluded = set(excluded_voice_ids or set())
+    user_msg = _format_user_prompt(
+        source,
+        readme=readme,
+        image_style=image_style,
+        excluded_voice_ids=excluded,
+    )
     candidates = [model or DEFAULT_MODEL] + [
         m for m in FALLBACK_MODELS if m != (model or DEFAULT_MODEL)
     ]
@@ -392,11 +620,32 @@ def generate_identity(
                 last_err = RuntimeError(f"Model {m} returned empty content")
                 continue
             obj = _parse_identity(text)
+            # Last-resort defense: GPT sometimes picks a voice that was
+            # explicitly excluded. Reassign to a same-gender alternative
+            # if so. The catalog filter in the user message handles this
+            # >99% of the time; this is purely a safety net.
+            picked = obj["voice_preset"]
+            if picked in excluded:
+                picked_gender = VOICE_BY_ID.get(picked, {}).get("gender", "neutral")
+                candidates = voices_for_gender(picked_gender, exclude=excluded)
+                if not candidates:
+                    # Even neutrals exhausted — fall back to any unused id.
+                    candidates = [v["id"] for v in VOICE_OPTIONS if v["id"] not in excluded]
+                if candidates:
+                    log.info(
+                        "model picked excluded voice %r; reassigning to %r "
+                        "(same gender bucket: %s)", picked, candidates[0], picked_gender,
+                    )
+                    obj["voice_preset"] = candidates[0]
             obj["weirdness"] = max(0.0, min(1.0, float(weirdness)))
             obj["personality"] = compose_personality(
                 domain_body=obj["domain_body"],
                 weirdness=obj["weirdness"],
             )
+            # Record the directive that produced this image_prompt so
+            # later debug / UI can see why a particular avatar looks the
+            # way it does, and so a regenerate can deliberately swap.
+            obj["image_style"] = image_style
             return obj
         except Exception as e:
             log.warning("identity model %s failed: %s", m, e)

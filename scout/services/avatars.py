@@ -27,9 +27,61 @@ from typing import Optional
 
 from runwayml import RunwayML
 
-from . import knowledge, storage
+from . import knowledge, prompts, storage
 
 log = logging.getLogger("scout.avatars")
+
+
+def _voices_taken_by_other_custom_avatars(this_gen_id: str) -> set[str]:
+    """Return the set of voice_preset ids already in use by other
+    generations that have been promoted to a Runway custom avatar
+    (``runway_avatar_id`` not null). Used to detect cross-batch voice
+    collisions when this generation is about to be promoted itself."""
+    with storage._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT voice_preset FROM generations
+             WHERE runway_avatar_id IS NOT NULL
+               AND runway_avatar_id <> ''
+               AND id <> ?
+               AND voice_preset IS NOT NULL
+               AND voice_preset <> ''
+            """,
+            (this_gen_id,),
+        ).fetchall()
+    return {r["voice_preset"] for r in rows}
+
+
+def _reassign_voice_if_collision(gen_id: str, current_voice: str) -> str:
+    """Layer-2 safety net: if ``current_voice`` is already used by another
+    custom avatar, swap to an unused voice from the same gender bucket
+    (falling back to neutral, then to any unused id). Persists the swap
+    on the DB row.
+
+    Returns the (possibly new) voice id. If no collision OR no replacement
+    is available, returns ``current_voice`` unchanged.
+    """
+    taken = _voices_taken_by_other_custom_avatars(gen_id)
+    if current_voice not in taken:
+        return current_voice
+    gender = prompts.VOICE_BY_ID.get(current_voice, {}).get("gender", "neutral")
+    candidates = prompts.voices_for_gender(gender, exclude=taken)
+    if not candidates:
+        # gender-specific + neutral both exhausted — fall back to any unused
+        candidates = [v["id"] for v in prompts.VOICE_OPTIONS if v["id"] not in taken]
+    if not candidates:
+        log.warning(
+            "gen=%s voice collision on %r but no replacement available; "
+            "keeping the duplicate", gen_id, current_voice,
+        )
+        return current_voice
+    new_voice = candidates[0]
+    log.info(
+        "gen=%s cross-batch voice collision: %r is taken; reassigning to %r "
+        "(same gender bucket: %s)", gen_id, current_voice, new_voice, gender,
+    )
+    storage.update_generation(gen_id, voice_preset=new_voice)
+    return new_voice
 
 
 def _client() -> RunwayML:
@@ -100,6 +152,15 @@ def create_avatar_for_generation(gen_id: str) -> dict:
         reference_url = _upload_reference(client, image_path)
         log.info("uploaded gen=%s -> %s", gen_id, reference_url[:80])
 
+        # Cross-batch voice-collision guard: if another generation has
+        # already become a Runway custom avatar with this same voice
+        # preset, swap to an unused same-gender voice and persist the
+        # swap. (Layer 1 batch-coord in /api/generate covers same-batch
+        # collisions; this catches the cross-batch case the user
+        # actually hit — two avatars made separately ending up with
+        # the same voice.)
+        effective_voice = _reassign_voice_if_collision(gen_id, rec["voice_preset"])
+
         # Personality and start_script are passed to the avatar at *create*
         # time — Runway stores them and uses them as the default for every
         # realtime session that uses this avatar id.
@@ -109,7 +170,7 @@ def create_avatar_for_generation(gen_id: str) -> dict:
             "reference_image": reference_url,
             "voice": {
                 "type": "runway-live-preset",
-                "preset_id": rec["voice_preset"],
+                "preset_id": effective_voice,
             },
         }
         if rec.get("start_script"):
@@ -119,7 +180,7 @@ def create_avatar_for_generation(gen_id: str) -> dict:
             "creating runway avatar gen=%s name=%r voice=%s",
             gen_id,
             kwargs["name"],
-            rec["voice_preset"],
+            effective_voice,
         )
         created = client.avatars.create(**kwargs)
         avatar_id = getattr(created, "id", None) or getattr(created, "avatar_id", None)
@@ -153,3 +214,68 @@ def create_avatar_for_generation(gen_id: str) -> dict:
             avatar_error=f"{type(e).__name__}: {e}"[:1000],
         )
         return storage.get_generation(gen_id) or {}
+
+
+def delete_runway_artifacts(gen_id: str) -> dict:
+    """Best-effort teardown of the Runway-side artifacts owned by this
+    generation: the custom character and every document attached to it.
+
+    Never raises — failures are logged and reported in the return dict
+    so the caller can decide whether to surface them. Local DB / disk
+    cleanup is the caller's responsibility (storage.delete_generation).
+    """
+    rec = storage.get_generation(gen_id)
+    if not rec:
+        return {"avatar_deleted": False, "documents_deleted": 0, "errors": ["generation not found"]}
+
+    errors: list[str] = []
+    avatar_id = rec.get("runway_avatar_id")
+    doc_ids_csv = rec.get("runway_document_ids") or ""
+    doc_ids = [d for d in doc_ids_csv.split(",") if d.strip()]
+
+    if not avatar_id and not doc_ids:
+        return {"avatar_deleted": False, "documents_deleted": 0, "errors": []}
+
+    try:
+        client = _client()
+    except Exception as e:
+        # No key → can't talk to Runway. Surface the error but allow the
+        # local delete to proceed (the user explicitly asked to delete).
+        return {
+            "avatar_deleted": False,
+            "documents_deleted": 0,
+            "errors": [f"{type(e).__name__}: {e}"],
+        }
+
+    avatar_deleted = False
+    if avatar_id:
+        try:
+            client.avatars.delete(avatar_id)
+            avatar_deleted = True
+            log.info("gen=%s runway avatar %s deleted", gen_id, avatar_id)
+        except Exception as e:
+            msg = f"avatar {avatar_id}: {type(e).__name__}: {e}"
+            log.warning("gen=%s runway avatar delete failed: %s", gen_id, msg)
+            errors.append(msg)
+
+    documents_deleted = 0
+    for did in doc_ids:
+        try:
+            client.documents.delete(did)
+            documents_deleted += 1
+        except Exception as e:
+            msg = f"document {did}: {type(e).__name__}: {e}"
+            log.warning("gen=%s runway document delete failed: %s", gen_id, msg)
+            errors.append(msg)
+    if doc_ids:
+        log.info(
+            "gen=%s runway documents deleted: %d/%d",
+            gen_id, documents_deleted, len(doc_ids),
+        )
+
+    return {
+        "avatar_deleted": avatar_deleted,
+        "documents_deleted": documents_deleted,
+        "documents_total": len(doc_ids),
+        "errors": errors,
+    }

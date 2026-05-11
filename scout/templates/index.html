@@ -3,17 +3,21 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Scout — Papers &amp; Repos to Avatars</title>
+  <title>inspirostorm</title>
+  <link rel="icon" type="image/x-icon" href="/static/favicon/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon/favicon-16x16.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon/favicon-32x32.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/favicon/apple-touch-icon.png" />
+  <link rel="manifest" href="/static/favicon/site.webmanifest" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <header class="topbar">
-    <h1>Scout <span class="muted">→ avatars</span></h1>
+    <h1>inspirostorm</h1>
     <p class="lede">
-      Scan a GitHub user, an arXiv query, or upload your own zip / PDF. Pick
-      up to 3 items. We'll write a prompt for each one and have RunwayML draw
-      a head-and-shoulders avatar that captures its vibe — then you can turn
-      any of them into a custom Runway character.
+      Turn YouTube, repos, webpages, pdfs etc into video avatars that debate
+      and brainstorm over Zoom, then convert their final results into a short
+      video to inspire and inform.
     </p>
     <p class="lede">
       <a href="/brainstorm" class="btn btn--make">Brainstorms →</a>
@@ -25,6 +29,8 @@
       <div class="tabs" role="tablist">
         <button class="tab tab--active" data-tab="github" role="tab">GitHub</button>
         <button class="tab" data-tab="arxiv" role="tab">arXiv</button>
+        <button class="tab" data-tab="url" role="tab">Web URL</button>
+        <button class="tab" data-tab="youtube" role="tab">YouTube</button>
         <button class="tab" data-tab="upload" role="tab">Upload</button>
       </div>
 
@@ -66,6 +72,40 @@
           <input name="limit" type="number" min="1" max="100" value="30" />
         </label>
         <button type="submit" class="primary">Search arXiv</button>
+      </form>
+
+      <form id="form-url" class="scan-form scan-form--upload hidden"
+            data-source="url">
+        <label class="span-2">
+          Webpage URL
+          <input name="url" type="url" placeholder="https://example.com/article" required />
+        </label>
+        <label class="span-2">
+          Title (optional — falls back to the page's &lt;title&gt;)
+          <input name="title" placeholder="e.g. Karpathy on RNNs" />
+        </label>
+        <label class="span-2">
+          Description (optional — feeds the persona prompt)
+          <input name="description" placeholder="Why this page? What's the angle?" />
+        </label>
+        <button type="submit" class="primary">Scrape &amp; clean</button>
+      </form>
+
+      <form id="form-youtube" class="scan-form scan-form--upload hidden"
+            data-source="youtube">
+        <label class="span-2">
+          YouTube URL (or 11-char video ID)
+          <input name="url" type="text" placeholder="https://www.youtube.com/watch?v=..." required />
+        </label>
+        <label class="span-2">
+          Title (optional — falls back to the video's title)
+          <input name="title" placeholder="e.g. Karpathy on transformer internals" />
+        </label>
+        <label class="span-2">
+          Description (optional — feeds the persona prompt)
+          <input name="description" placeholder="Why this video? What's the angle?" />
+        </label>
+        <button type="submit" class="primary">Fetch transcript</button>
       </form>
 
       <form id="form-upload" class="scan-form scan-form--upload hidden"

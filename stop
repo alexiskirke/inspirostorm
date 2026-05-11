@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# Cleanly tear down every server / helper process belonging to this app.
+#
+# Catches:
+#   - scout FastAPI         (uvicorn on :8000)
+#   - meet Express server   (node server.js on :3000)
+#   - app/ Express server   (tsx server/index.ts on :3001)
+#   - app/ Vite dev server  (:5173)
+#   - tunnel_watchdog       (python -m scout.scripts.tunnel_watchdog)
+#   - cloudflared tunnel    (npx cloudflared ... — survives if orphaned)
+#
+# Shutdown order (each phase waits for graceful exit before continuing):
+#   1. End any live brainstorm session via the scout API so Recall.ai
+#      removes its bots from the Zoom (avoids zombie tiles + ongoing cost).
+#   2. SIGTERM the tunnel_watchdog first — it owns cloudflared + meet
+#      and its own SIGTERM handler tears them down cleanly.
+#   3. SIGTERM everything still alive (scout, app/, orphaned cloudflared).
+#   4. SIGKILL anything that survived after a grace period.
+#
+# Usage:
+#   ./stop                   # full clean teardown (default)
+#   ./stop -n / --dry-run    # show what would be killed, don't kill
+#   ./stop --skip-sessions   # don't try to end Recall.ai brainstorm sessions
+#   ./stop --help
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+DRY=0
+SKIP_SESSIONS=0
+for arg in "$@"; do
+  case "$arg" in
+    -n|--dry-run)    DRY=1 ;;
+    --skip-sessions) SKIP_SESSIONS=1 ;;
+    -h|--help)
+      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "unknown flag: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# ----- helpers -----
+
+pids_on_port() {
+  lsof -tiTCP:"$1" -sTCP:LISTEN -P -n 2>/dev/null || true
+}
+
+pids_matching() {
+  # Exclude our own pid and our pgrep child.
+  pgrep -f "$1" 2>/dev/null | grep -v "^$$\$" || true
+}
+
+# Bash 3.2-compatible "already seen this pid?" check.
+SEEN_PIDS=()
+mark_seen() { SEEN_PIDS+=("$1"); }
+is_seen() {
+  local p
+  for p in "${SEEN_PIDS[@]:-}"; do
+    [[ "$p" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# (label, pid) pairs go here as "label|pid".
+TARGETS=()
+add_target() {
+  local label="$1" pid="$2"
+  is_seen "$pid" && return 0
+  TARGETS+=("$label|$pid")
+  mark_seen "$pid"
+}
+
+add_port() {
+  local label="$1" port="$2" pid
+  for pid in $(pids_on_port "$port"); do
+    add_target "$label (:$port)" "$pid"
+  done
+}
+
+add_pattern() {
+  local label="$1" pattern="$2" pid
+  for pid in $(pids_matching "$pattern"); do
+    add_target "$label" "$pid"
+  done
+}
+
+# ----- collect PIDs -----
+# Order matters: watchdog detected FIRST so phase-2 can SIGTERM it
+# before anything else. Then port-based detection. Then pattern-based
+# fallbacks for things that don't listen on a known port.
+add_pattern "tunnel watchdog"  "scout\.scripts\.tunnel_watchdog"
+
+add_port "scout uvicorn"   8000
+add_port "meet"            3000
+add_port "app/ server"     3001
+add_port "app/ vite"       5173
+
+# cloudflared spawns a 3-deep tree (npm exec → node shim → cloudflared
+# binary). Catch all of them; even orphaned, they're tied together by
+# pattern.
+add_pattern "cloudflared"      "cloudflared.*tunnel.*--url"
+# app/ Express server (tsx watch) — sometimes parent isn't on :3001 yet.
+add_pattern "app/ server"      "tsx watch server/index\\.ts"
+
+# ----- report what we found -----
+
+if [[ ${#TARGETS[@]} -eq 0 ]]; then
+  echo "✓ nothing to stop."
+  exit 0
+fi
+
+echo "Found ${#TARGETS[@]} process(es):"
+for t in "${TARGETS[@]}"; do
+  label="${t%|*}"
+  pid="${t##*|}"
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null | cut -c1-90)"
+  printf "  pid %-7s  %-22s  %s\n" "$pid" "$label" "${cmd:-(gone)}"
+done
+
+if [[ $DRY -eq 1 ]]; then
+  echo
+  echo "(dry run — nothing killed)"
+  exit 0
+fi
+
+# Helper: send signal to a label, with optional grace wait.
+# Returns 0 if all matched PIDs are gone, 1 otherwise.
+all_dead() {
+  local pid
+  for t in "$@"; do
+    pid="${t##*|}"
+    kill -0 "$pid" 2>/dev/null && return 1
+  done
+  return 0
+}
+
+# ----- Phase 1: end live brainstorm sessions via scout API -----
+# Only meaningful if scout is alive. Best effort — never blocks teardown.
+
+scout_alive() {
+  curl -fsS --max-time 2 http://127.0.0.1:8000/api/health > /dev/null 2>&1
+}
+
+end_live_sessions() {
+  [[ $SKIP_SESSIONS -eq 1 ]] && return 0
+  if ! scout_alive; then
+    return 0
+  fi
+  local db="$ROOT/scout/data/scout.db"
+  if [[ ! -f "$db" ]]; then
+    return 0
+  fi
+  # Live sessions = brainstorm_sessions.status='live'.
+  local live_ids
+  live_ids="$("$ROOT/venv/bin/python" -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect('$db')
+    rows = conn.execute(\"SELECT id FROM brainstorm_sessions WHERE status='live'\").fetchall()
+    print('\n'.join(r[0] for r in rows))
+except Exception as e:
+    sys.stderr.write(f'(could not query brainstorm_sessions: {e})\n')
+" 2>/dev/null)" || return 0
+  if [[ -z "$live_ids" ]]; then
+    return 0
+  fi
+  local count
+  count=$(printf '%s\n' "$live_ids" | wc -l | tr -d ' ')
+  echo
+  echo "→ ending $count live brainstorm session(s) (lets Recall.ai remove its bots)…"
+  local id
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    printf "  • %s … " "$id"
+    if curl -fsS --max-time 10 -X POST \
+         "http://127.0.0.1:8000/api/brainstorm/sessions/$id/end?reason=stop_script" \
+         > /dev/null 2>&1; then
+      echo "ended"
+    else
+      echo "(end call failed, continuing)"
+    fi
+  done <<< "$live_ids"
+}
+
+end_live_sessions
+
+# ----- Phase 2: SIGTERM the watchdog first; let it tear down cloudflared+meet -----
+
+WATCHDOG_TARGETS=()
+OTHER_TARGETS=()
+for t in "${TARGETS[@]}"; do
+  case "$t" in
+    "tunnel watchdog"*) WATCHDOG_TARGETS+=("$t") ;;
+    *)                   OTHER_TARGETS+=("$t") ;;
+  esac
+done
+
+if [[ ${#WATCHDOG_TARGETS[@]} -gt 0 ]]; then
+  echo
+  echo "→ phase 2: SIGTERM tunnel watchdog (it owns cloudflared + meet)…"
+  for t in "${WATCHDOG_TARGETS[@]}"; do
+    pid="${t##*|}"
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  # Watchdog needs a moment to SIGTERM its children.
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    if all_dead "${WATCHDOG_TARGETS[@]}"; then
+      break
+    fi
+  done
+fi
+
+# After the watchdog exits, re-scan for stragglers — its children may
+# now have stopped (and so dropped off our port detection too).
+REMAINING=()
+for t in "${OTHER_TARGETS[@]}"; do
+  pid="${t##*|}"
+  if kill -0 "$pid" 2>/dev/null; then
+    REMAINING+=("$t")
+  fi
+done
+
+# ----- Phase 3: SIGTERM everything else -----
+
+if [[ ${#REMAINING[@]} -gt 0 ]]; then
+  echo
+  echo "→ phase 3: SIGTERM ${#REMAINING[@]} remaining process(es)…"
+  for t in "${REMAINING[@]}"; do
+    pid="${t##*|}"
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  sleep 2
+fi
+
+# ----- Phase 4: SIGKILL anything still alive -----
+
+STILL=()
+for t in "${TARGETS[@]}"; do
+  pid="${t##*|}"
+  if kill -0 "$pid" 2>/dev/null; then
+    STILL+=("$t")
+  fi
+done
+
+if [[ ${#STILL[@]} -gt 0 ]]; then
+  echo
+  echo "→ phase 4: SIGKILL ${#STILL[@]} survivor(s)…"
+  for t in "${STILL[@]}"; do
+    pid="${t##*|}"
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  sleep 1
+fi
+
+# Final verdict.
+FINAL=()
+for t in "${TARGETS[@]}"; do
+  pid="${t##*|}"
+  if kill -0 "$pid" 2>/dev/null; then
+    FINAL+=("$t")
+  fi
+done
+
+if [[ ${#FINAL[@]} -gt 0 ]]; then
+  echo
+  echo "✗ ${#FINAL[@]} process(es) survived SIGKILL (permissions / zombie?):"
+  for t in "${FINAL[@]}"; do
+    echo "    $t"
+  done
+  exit 1
+fi
+
+echo
+echo "✓ all stopped cleanly."

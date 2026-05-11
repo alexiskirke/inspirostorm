@@ -9,7 +9,7 @@ Key entities (see ``storage.init_db`` for the SQLite schema):
                           ids, plus the captured transcripts
   brainstorm_state        rolling per-thread memory blob (gpt-5.1
                           summariser writes here on session end)
-  brainstorm_synthesis    deeper gpt-5.5 outputs + movie pitch
+  brainstorm_synthesis    deeper gpt-5.4 outputs + movie pitch
 
 Lifecycle (happy path):
 
@@ -31,7 +31,7 @@ Lifecycle (happy path):
       tells the meet server to stop both bots, snapshots the
       transcripts into the row, then calls summarise_into_state() to
       let the next session pick up where this one left off. Synthesis
-      (gpt-5.5) is intentionally separate so it can be re-run on
+      (gpt-5.4) is intentionally separate so it can be re-run on
       demand without touching the per-session memory plumbing.
 """
 from __future__ import annotations
@@ -56,6 +56,11 @@ log = logging.getLogger("scout.brainstorm")
 
 MEET_BASE_URL = os.environ.get("MEET_BASE_URL", "http://localhost:3000")
 DEFAULT_MEETING_URL = os.environ.get("BRAINSTORM_DEFAULT_MEETING_URL", "")
+# When PERSONAL_ZOOM_ROOM is set, every brainstorm session is routed to
+# that URL regardless of what the caller passed. The meet server enforces
+# the same override (see meet/server.js); we mirror it here so the DB
+# row + logs record the URL the avatars actually joined.
+PERSONAL_ZOOM_ROOM = (os.environ.get("PERSONAL_ZOOM_ROOM") or "").strip()
 
 # Path to the upstream runway-characters-meet .env (cloned to ./meet).
 # We peek at PUBLIC_URL there so we can pre-flight the tunnel before
@@ -277,9 +282,17 @@ def start_session(
     rolling = state.get("rolling_summary")
 
     meeting = (meeting_url or DEFAULT_MEETING_URL or "").strip()
+    if PERSONAL_ZOOM_ROOM:
+        if meeting and meeting != PERSONAL_ZOOM_ROOM:
+            log.info(
+                "PERSONAL_ZOOM_ROOM override: rewriting %s -> %s",
+                meeting, PERSONAL_ZOOM_ROOM,
+            )
+        meeting = PERSONAL_ZOOM_ROOM
     if not meeting:
         raise ValueError(
-            "no meeting_url provided and BRAINSTORM_DEFAULT_MEETING_URL is unset"
+            "no meeting_url provided and neither BRAINSTORM_DEFAULT_MEETING_URL "
+            "nor PERSONAL_ZOOM_ROOM is set"
         )
 
     effective_topic = (

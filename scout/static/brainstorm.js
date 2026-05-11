@@ -8,7 +8,7 @@
  *   POST /api/brainstorm/start               — create-or-resume thread + start session
  *   GET  /api/brainstorm/threads/:id         — full thread state (sessions + memory)
  *   POST /api/brainstorm/sessions/:id/end    — end a live session (auto-summarises)
- *   POST /api/brainstorm/threads/:id/synthesise — gpt-5.5 deep synthesis
+ *   POST /api/brainstorm/threads/:id/synthesise — gpt-5.4 deep synthesis
  *   GET  /api/brainstorm/threads/:id/synthesis  — list past syntheses
  *   GET  /api/sessions/:id/transcript            — meet server live transcript
  */
@@ -45,6 +45,58 @@ async function init() {
   const qs = new URLSearchParams(location.search);
   const t = qs.get("thread");
   if (t) selectThread(t);
+  const resetBtn = document.getElementById("reset-brainstorms");
+  if (resetBtn) resetBtn.addEventListener("click", resetBrainstorms);
+}
+
+async function resetBrainstorms() {
+  const msg =
+    "Wipe ALL brainstorm history?\n\n" +
+    "This deletes every thread, session, rolling memory entry, " +
+    "synthesis, and the per-synthesis movie + composite files on disk.\n\n" +
+    "Your avatars (gallery + Runway custom characters + attached docs) " +
+    "are kept. You can pair them into a fresh thread afterwards.";
+  if (!window.confirm(msg)) return;
+
+  const btn = document.getElementById("reset-brainstorms");
+  if (btn) { btn.disabled = true; btn.textContent = "Resetting…"; }
+  try {
+    const res = await fetch("/api/brainstorm/reset", { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Reset failed: ${err.detail || res.statusText}`);
+      return;
+    }
+    const data = await res.json();
+    const c = data.counts || {};
+    // Clear local state so nothing referencing a deleted thread lingers.
+    state.threads = [];
+    state.selectedThreadId = null;
+    state.threadDetail = null;
+    state.synthesis = [];
+    for (const h of state.livePollers.values()) clearInterval(h);
+    state.livePollers.clear();
+    if (state.moviePollTimer) {
+      clearInterval(state.moviePollTimer);
+      state.moviePollTimer = null;
+    }
+    document.getElementById("thread-panel").classList.add("hidden");
+    history.replaceState({}, "", location.pathname); // drop ?thread=… if set
+    await loadThreads();
+    alert(
+      `Reset complete:\n` +
+      `  threads:    ${c.threads ?? 0}\n` +
+      `  sessions:   ${c.sessions ?? 0}\n` +
+      `  state rows: ${c.state_rows ?? 0}\n` +
+      `  syntheses:  ${c.syntheses ?? 0}\n` +
+      `  movies:     ${c.movies_deleted ?? 0}\n` +
+      `  composites: ${c.composites_deleted ?? 0}`
+    );
+  } catch (e) {
+    alert(`Reset failed: ${e}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Reset brainstorms"; }
+  }
 }
 
 // ----- avatars (the dropdowns) -----
@@ -291,7 +343,7 @@ function pollLiveTranscript(sess, container) {
 function renderSyntheses(items) {
   els.synth.innerHTML = "";
   if (items.length === 0) {
-    els.synth.innerHTML = '<em class="muted">No syntheses yet. Click <b>Synthesise (gpt-5.5)</b> after a few sessions to see what they came up with.</em>';
+    els.synth.innerHTML = '<em class="muted">No syntheses yet. Click <b>Synthesise (gpt-5.4)</b> after a few sessions to see what they came up with.</em>';
     return;
   }
   for (const s of items) {
@@ -344,7 +396,7 @@ function renderMovieBlock(s) {
   } else if (status === "building") {
     const pill = document.createElement("div");
     pill.className = "synth-card__movie-pill synth-card__movie-pill--building";
-    pill.innerHTML = `<span class="spinner spinner--sm"></span> building 24-sec movie · ~3-4 minutes (composites + 3 Veo clips + music + ffmpeg)`;
+    pill.innerHTML = `<span class="spinner spinner--sm"></span> building 24-sec movie · ~3-4 minutes (composites + 3 Veo clips + ffmpeg concat)`;
     wrap.appendChild(pill);
     // Auto-refresh while building.
     scheduleMoviePoll();
@@ -363,7 +415,7 @@ function renderMovieBlock(s) {
     const btn = document.createElement("button");
     btn.className = "btn btn--make";
     btn.textContent = "🎬 Generate 24-sec movie (~400 credits)";
-    btn.title = "3 Veo clips × 8s + composites + sound_effect underscore + ffmpeg mix.";
+    btn.title = "3 Veo clips × 8s with dialogue + composites + ffmpeg concat.";
     btn.addEventListener("click", () => triggerMovie(s.id, btn));
     wrap.appendChild(btn);
   }
@@ -458,10 +510,16 @@ async function continueThread() {
   if (!state.selectedThreadId) return;
   const t = state.threads.find((x) => x.id === state.selectedThreadId);
   if (!t) return;
-  const meeting = prompt(
-    "Zoom URL for this session (leave blank to use the server default):",
-    "",
-  );
+  // When PERSONAL_ZOOM_ROOM is set on the server, the URL is forced
+  // regardless of what we send — skip the prompt so the user isn't
+  // asked for something the system will ignore.
+  const personalZoom = !!(window.SCOUT_DEFAULTS && window.SCOUT_DEFAULTS.personal_zoom_active);
+  const meeting = personalZoom
+    ? null
+    : prompt(
+        "Zoom URL for this session (leave blank to use the server default):",
+        "",
+      );
   const topic = prompt(
     "Topic for THIS session (optional — leave blank to use the thread's seed):",
     "",
@@ -523,7 +581,7 @@ els.synthesiseBtn.addEventListener("click", async () => {
     await loadThreadDetails();
   } finally {
     els.synthesiseBtn.disabled = false;
-    els.synthesiseBtn.textContent = "Synthesise (gpt-5.5)";
+    els.synthesiseBtn.textContent = "Synthesise (gpt-5.4)";
   }
 });
 

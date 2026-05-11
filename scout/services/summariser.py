@@ -8,7 +8,7 @@ condenses the latest transcript + the prior rolling memory into:
                          start of their next session (injected as the
                          ONGOING block by ``prompts.compose_personality``)
   - ``ideas``            structured list of concrete ideas raised (used
-                         later by the gpt-5.5 thread-level synthesiser)
+                         later by the gpt-5.4 thread-level synthesiser)
 
 We deliberately use a CHEAP model here (gpt-5.1 full, not 5.5) — this
 runs after every session and the work is mostly compression, not

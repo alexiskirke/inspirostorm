@@ -85,9 +85,10 @@ async function handleScan(form) {
       return;
     }
     const data = await res.json();
-    if (src === "upload") {
-      // Append to (don't replace) so users can stack several uploads
-      // alongside any previous scan results.
+    if (src === "upload" || src === "url" || src === "youtube") {
+      // Append to (don't replace) so users can stack several single-item
+      // sources (uploads, scraped URLs, YouTube videos) alongside any
+      // previous scan results.
       const seen = new Set(state.results.map((r) => r.id));
       for (const item of data.items) {
         if (!seen.has(item.id)) state.results.unshift(item);
@@ -119,6 +120,14 @@ document.getElementById("form-arxiv").addEventListener("submit", (e) => {
   handleScan(e.currentTarget);
 });
 document.getElementById("form-upload").addEventListener("submit", (e) => {
+  e.preventDefault();
+  handleScan(e.currentTarget);
+});
+document.getElementById("form-url").addEventListener("submit", (e) => {
+  e.preventDefault();
+  handleScan(e.currentTarget);
+});
+document.getElementById("form-youtube").addEventListener("submit", (e) => {
   e.preventDefault();
   handleScan(e.currentTarget);
 });
@@ -176,6 +185,18 @@ function renderResults() {
         meta.appendChild(tag(`${m.file_count} files`, "tag--gray"));
       if (typeof m.text_chars === "number" && m.text_chars > 0)
         meta.appendChild(tag(`${Math.round(m.text_chars / 1000)}k chars`, "tag--gray"));
+    } else if (item.source === "url") {
+      const m = item.meta || {};
+      meta.appendChild(tag("webpage", "tag--orange"));
+      if (typeof m.cleaned_chars === "number" && m.cleaned_chars > 0)
+        meta.appendChild(tag(`${Math.round(m.cleaned_chars / 1000)}k chars`, "tag--gray"));
+    } else if (item.source === "youtube") {
+      const m = item.meta || {};
+      meta.appendChild(tag("youtube", "tag--orange"));
+      if (m.language_code)
+        meta.appendChild(tag(m.language_code + (m.was_translated ? " → en" : ""), "tag--gray"));
+      if (typeof m.cleaned_chars === "number" && m.cleaned_chars > 0)
+        meta.appendChild(tag(`${Math.round(m.cleaned_chars / 1000)}k chars`, "tag--gray"));
     }
 
     if (item.url) {
@@ -183,7 +204,12 @@ function renderResults() {
       link.href = item.url;
       link.target = "_blank";
       link.rel = "noreferrer";
-      link.textContent = item.source === "github" ? "view repo →" : "arXiv →";
+      link.textContent =
+        item.source === "github" ? "view repo →"
+        : item.source === "arxiv" ? "arXiv →"
+        : item.source === "url" ? "open page →"
+        : item.source === "youtube" ? "watch →"
+        : "open →";
       link.addEventListener("click", (e) => e.stopPropagation());
       meta.appendChild(link);
     }
@@ -434,8 +460,62 @@ function renderGallery() {
       body.appendChild(link);
     }
 
+    // Always-available delete control. Sits in its own footer row so
+    // it's discoverable in every card state (pending, running, failed,
+    // succeeded with or without avatar/KB).
+    const footer = document.createElement("div");
+    footer.className = "gen__footer";
+    const del = document.createElement("button");
+    del.className = "btn btn--ghost btn--sm gen__delete";
+    del.textContent = "Delete";
+    del.title = "Delete this avatar — removes the local row + image and (if attached) the Runway custom character + knowledge docs";
+    del.addEventListener("click", () => deleteAvatar(g, del));
+    footer.appendChild(del);
+    body.appendChild(footer);
+
     card.append(wrap, body);
     els.gallery.appendChild(card);
+  }
+}
+
+async function deleteAvatar(g, btn) {
+  // Build a confirmation message that names what's actually getting removed.
+  const parts = ["the local row + image"];
+  if (g.runway_avatar_id) parts.push("the Runway custom avatar");
+  if (g.kb_doc_count) parts.push(`${g.kb_doc_count} knowledge document${g.kb_doc_count === 1 ? "" : "s"}`);
+  const label = g.character_name || g.source_title || g.id;
+  const msg = `Delete "${label}"?\n\nThis removes ${parts.join(" + ")}.\n\nBrainstorm history that involves this avatar is kept but will show it as deleted.`;
+  if (!window.confirm(msg)) return;
+
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  try {
+    const res = await fetch(`/api/generations/${g.id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Delete failed: ${err.detail || res.statusText}`);
+      btn.disabled = false;
+      btn.textContent = "Delete";
+      return;
+    }
+    const data = await res.json();
+    state.generations.delete(g.id);
+    renderGallery();
+    // Surface partial-failure info (Runway side errored but local removed)
+    // so the user knows there may be orphans on the Runway account.
+    const errs = data.runway?.errors || [];
+    if (errs.length) {
+      console.warn("Runway cleanup partial failure:", errs);
+      alert(
+        `Deleted locally, but Runway cleanup had ${errs.length} issue(s):\n` +
+        errs.slice(0, 5).join("\n") +
+        (errs.length > 5 ? `\n…and ${errs.length - 5} more` : "")
+      );
+    }
+  } catch (e) {
+    alert(`Delete failed: ${e}`);
+    btn.disabled = false;
+    btn.textContent = "Delete";
   }
 }
 

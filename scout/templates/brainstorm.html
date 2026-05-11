@@ -3,21 +3,30 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Scout — Brainstorms</title>
+  <title>inspirostorm — brainstorms</title>
+  <link rel="icon" type="image/x-icon" href="/static/favicon/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon/favicon-16x16.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon/favicon-32x32.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/favicon/apple-touch-icon.png" />
+  <link rel="manifest" href="/static/favicon/site.webmanifest" />
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="stylesheet" href="/static/brainstorm.css" />
 </head>
 <body>
   <header class="topbar">
-    <h1>Scout <span class="muted">→ brainstorms</span></h1>
+    <h1>inspirostorm <span class="muted">→ brainstorms</span></h1>
     <p class="lede">
       Pair two of your custom avatars in a Zoom and let them brainstorm.
       Each session is summarised by gpt-5.1 so the next session picks up
-      where they left off; on demand, gpt-5.5 synthesises the whole
+      where they left off; on demand, gpt-5.4 synthesises the whole
       thread into a deeper idea + movie pitch.
     </p>
     <p class="lede">
       <a href="/" class="btn btn--ghost btn--sm">← gallery</a>
+      <button id="reset-brainstorms" class="btn btn--ghost btn--sm gen__delete"
+              title="Wipe ALL brainstorm threads, sessions, rolling memory, syntheses, and the per-synthesis movie + composite files. Avatars themselves are kept.">
+        Reset brainstorms
+      </button>
     </p>
   </header>
 
@@ -43,10 +52,17 @@
           <input name="topic"
             placeholder="e.g. propose a new web app combining your fields · co-write a 50-word screenplay logline · invent an unconventional research project · design a one-page workflow they could prototype together" />
         </label>
+        {% if personal_zoom_active %}
+        <div class="span-2 muted small">
+          🔒 PERSONAL_ZOOM_ROOM is set — every brainstorm joins your personal
+          room. No URL needed here.
+        </div>
+        {% else %}
         <label class="span-2">
           Zoom URL (defaults to BRAINSTORM_DEFAULT_MEETING_URL on the server)
           <input name="meeting_url" placeholder="https://us04web.zoom.us/j/...?pwd=..." />
         </label>
+        {% endif %}
         <button type="submit" class="primary">Start brainstorm</button>
       </form>
       <div id="new-error" class="error hidden"></div>
@@ -67,7 +83,7 @@
         <h2 id="thread-title">Thread</h2>
         <div class="controls">
           <button id="thread-refresh" class="btn btn--ghost btn--sm">refresh</button>
-          <button id="thread-synthesise" class="btn btn--make">Synthesise (gpt-5.5)</button>
+          <button id="thread-synthesise" class="btn btn--make">Synthesise (gpt-5.4)</button>
         </div>
       </div>
       <div id="thread-meta" class="muted small"></div>
@@ -88,6 +104,7 @@
   <script>
     window.SCOUT_DEFAULTS = {
       chat_base_url: "{{ chat_base_url }}",
+      personal_zoom_active: {{ "true" if personal_zoom_active else "false" }},
     };
   </script>
   <script src="/static/brainstorm.js"></script>

@@ -547,6 +547,101 @@ def _pick_key_files_from_zip(paths: list[str], *, max_files: int) -> list[str]:
     return picked
 
 
+def build_url_documents(source: dict) -> list[DocChunk]:
+    """Knowledge docs for a webpage source.
+
+    Reads the GPT-cleaned text persisted at scrape time
+    (``source.meta.cleaned_path``) and produces an overview header doc
+    plus chunked body text. The webpage was already stripped of
+    boilerplate by ``web_scrape._llm_clean`` so we don't re-filter here.
+    """
+    meta = source.get("meta") or {}
+    cleaned_path = meta.get("cleaned_path")
+    if not cleaned_path:
+        return []
+    path = Path(cleaned_path)
+    if not path.exists():
+        log.warning("url cleaned text missing on disk: %s", cleaned_path)
+        return []
+    try:
+        body = path.read_text(encoding="utf-8")
+    except Exception as e:
+        log.warning("failed to read cleaned URL text %s: %s", path, e)
+        return []
+
+    title = source.get("title") or meta.get("page_title") or "Webpage"
+    page_url = source.get("url") or source.get("subtitle") or ""
+    description = (source.get("description") or "").strip()
+
+    overview_lines = [
+        f"# {title}",
+        "",
+        description or "(no description)",
+        "",
+        "## Source metadata",
+        f"- Kind: webpage",
+        f"- URL: {page_url}",
+        f"- Raw chars (before clean): {meta.get('raw_chars', 0)}",
+        f"- Cleaned chars: {meta.get('cleaned_chars', len(body))}",
+    ]
+    docs: list[DocChunk] = [
+        DocChunk(name=f"{title} — overview", content="\n".join(overview_lines))
+    ]
+    if body.strip():
+        docs.extend(_split_into_chunks(f"{title} — content", body))
+    return docs[:MAX_DOCS_PER_AVATAR]
+
+
+def build_youtube_documents(source: dict) -> list[DocChunk]:
+    """Knowledge docs for a YouTube video source.
+
+    Reads the joined transcript persisted at ingest time
+    (``source.meta.cleaned_path``) and produces an overview header doc
+    plus chunked body text. Snippet markers (``[Music]``) and timestamps
+    were already removed upstream.
+    """
+    meta = source.get("meta") or {}
+    cleaned_path = meta.get("cleaned_path")
+    if not cleaned_path:
+        return []
+    path = Path(cleaned_path)
+    if not path.exists():
+        log.warning("youtube transcript missing on disk: %s", cleaned_path)
+        return []
+    try:
+        body = path.read_text(encoding="utf-8")
+    except Exception as e:
+        log.warning("failed to read youtube transcript %s: %s", path, e)
+        return []
+
+    title = source.get("title") or f"YouTube video {meta.get('video_id', '')}"
+    video_url = source.get("url") or ""
+    channel = meta.get("channel") or "(unknown channel)"
+    description = (source.get("description") or "").strip()
+
+    overview_lines = [
+        f"# {title}",
+        "",
+        description or "(no description)",
+        "",
+        "## Source metadata",
+        f"- Kind: YouTube transcript",
+        f"- URL: {video_url}",
+        f"- Channel: {channel}",
+        f"- Video ID: {meta.get('video_id', '')}",
+        f"- Language: {meta.get('language_code', '?')}"
+        + (" (translated to en)" if meta.get("was_translated") else ""),
+        f"- Snippet count: {meta.get('snippet_count', 0)}",
+        f"- Transcript chars: {meta.get('cleaned_chars', len(body))}",
+    ]
+    docs: list[DocChunk] = [
+        DocChunk(name=f"{title} — overview", content="\n".join(overview_lines))
+    ]
+    if body.strip():
+        docs.extend(_split_into_chunks(f"{title} — transcript", body))
+    return docs[:MAX_DOCS_PER_AVATAR]
+
+
 def build_documents_for(source: dict, *, readme: str = "") -> list[DocChunk]:
     if source.get("source") == "github":
         return build_github_documents(source, readme=readme)
@@ -554,6 +649,10 @@ def build_documents_for(source: dict, *, readme: str = "") -> list[DocChunk]:
         return build_arxiv_documents(source)
     if source.get("source") == "upload":
         return build_upload_documents(source)
+    if source.get("source") == "url":
+        return build_url_documents(source)
+    if source.get("source") == "youtube":
+        return build_youtube_documents(source)
     return []
 
 

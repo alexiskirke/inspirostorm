@@ -34,6 +34,8 @@ from .services import (
     summariser,
     synthesis as synthesis_svc,
     uploads,
+    web_scrape,
+    youtube_transcript,
 )
 
 logging.basicConfig(
@@ -79,6 +81,18 @@ class GenerateRequest(BaseModel):
     ratio: Optional[str] = None
 
 
+class UrlScanRequest(BaseModel):
+    url: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+class YoutubeScanRequest(BaseModel):
+    url: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
 # ----- routes -----------------------------------------------------------------
 
 
@@ -103,7 +117,12 @@ def brainstorm_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "brainstorm.html",
-        {"chat_base_url": CHAT_BASE_URL},
+        {
+            "chat_base_url": CHAT_BASE_URL,
+            # Pass only the bool — never leak the actual room URL (which
+            # contains the embedded pwd) to every browser that hits /brainstorm.
+            "personal_zoom_active": bool(brainstorm.PERSONAL_ZOOM_ROOM),
+        },
     )
 
 
@@ -152,6 +171,50 @@ async def scan_upload(
     return {"items": [stored.source]}
 
 
+@app.post("/api/scan/url")
+def scan_url(req: UrlScanRequest) -> dict:
+    """Fetch a webpage, strip markup, ask GPT to keep only the relevant
+    body text, and return a single Scout source (same shape as
+    github/arxiv/upload scans). The cleaned text is persisted so it can
+    be re-used as the avatar's knowledge base."""
+    try:
+        stored = web_scrape.fetch_and_clean(
+            url=req.url,
+            title=req.title,
+            description=req.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        log.exception("url scrape failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"items": [stored.source]}
+
+
+@app.post("/api/scan/youtube")
+def scan_youtube(req: YoutubeScanRequest) -> dict:
+    """Pull a YouTube video's transcript and return a single Scout
+    source. No GPT cleaning — captions are already plain spoken text,
+    we just strip [Music]/[Applause] markers and join into paragraphs.
+    English-first language fallback with translation as last resort."""
+    try:
+        stored = youtube_transcript.fetch_and_store(
+            url=req.url,
+            title=req.title,
+            description=req.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        log.exception("youtube transcript fetch failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"items": [stored.source]}
+
+
 @app.post("/api/scan/arxiv")
 def scan_arxiv(req: ArxivScanRequest) -> dict:
     try:
@@ -182,9 +245,13 @@ def _readme_for(source: dict) -> str:
     - arXiv: nothing extra (the abstract is already in ``description``).
     - Upload: the ``preview_text`` we precomputed at upload time
       (README from the zip, or the first ~6k chars of the PDF).
+    - URL: the ``preview_text`` we precomputed at scrape time
+      (GPT-cleaned main-body text from the page).
+    - YouTube: the ``preview_text`` we precomputed at ingest time
+      (joined transcript snippets, ``[Music]`` markers stripped).
     """
     src = source.get("source")
-    if src == "upload":
+    if src in ("upload", "url", "youtube"):
         return source.get("preview_text") or ""
     if src != "github":
         return ""
@@ -215,6 +282,10 @@ def generate(req: GenerateRequest, _bg: BackgroundTasks) -> dict:
     chosen_model = req.model or images.DEFAULT_MODEL
     chosen_ratio = req.ratio or images.DEFAULT_RATIO
     created: list[dict] = []
+    # Track voices picked so far in this batch so the 2nd / 3rd identity
+    # call can't reuse them. Filtered catalog is passed into GPT via the
+    # user-message voice list — see prompts._format_user_prompt.
+    chosen_voices_this_batch: set[str] = set()
     for source in req.items:
         if not source.get("id") or not source.get("source"):
             raise HTTPException(
@@ -226,12 +297,17 @@ def generate(req: GenerateRequest, _bg: BackgroundTasks) -> dict:
                 "fetched readme for %s (%d chars)", source["id"], len(readme)
             )
         try:
-            identity = prompts.generate_identity(source, readme=readme)
+            identity = prompts.generate_identity(
+                source,
+                readme=readme,
+                excluded_voice_ids=chosen_voices_this_batch,
+            )
         except Exception as e:
             log.exception("identity generation failed for %s", source.get("id"))
             raise HTTPException(
                 status_code=502, detail=f"identity generation failed: {e}"
             )
+        chosen_voices_this_batch.add(identity["voice_preset"])
         gen_id = storage.create_generation(
             source=source,
             prompt=identity["image_prompt"],
@@ -356,6 +432,21 @@ def brainstorm_threads() -> dict:
     return {"items": brainstorm.list_threads()}
 
 
+@app.post("/api/brainstorm/reset")
+def brainstorm_reset() -> dict:
+    """Wipe ALL brainstorm history (threads, sessions, rolling memory,
+    syntheses + per-synthesis movie/composite files). Avatars + their
+    Runway custom characters are preserved."""
+    counts = storage.reset_brainstorm()
+    log.info(
+        "brainstorm reset: threads=%d sessions=%d state=%d syntheses=%d "
+        "movies=%d composites=%d",
+        counts["threads"], counts["sessions"], counts["state_rows"],
+        counts["syntheses"], counts["movies_deleted"], counts["composites_deleted"],
+    )
+    return {"reset": True, "counts": counts}
+
+
 @app.get("/api/brainstorm/threads/{thread_id}")
 def brainstorm_thread(thread_id: str) -> dict:
     th = brainstorm.get_thread(thread_id)
@@ -378,7 +469,7 @@ def brainstorm_session(session_id: str) -> dict:
 
 @app.post("/api/brainstorm/threads/{thread_id}/synthesise")
 def brainstorm_synthesise(thread_id: str) -> dict:
-    """Run gpt-5.5 synthesis across the whole thread. Returns the new
+    """Run gpt-5.4 synthesis across the whole thread. Returns the new
     synthesis row (text_md, movie_pitch, ideas)."""
     try:
         return synthesis_svc.synthesise_thread(thread_id)
@@ -470,6 +561,58 @@ def get_generation(gen_id: str) -> dict:
     return rec
 
 
+@app.delete("/api/generations/{gen_id}")
+def delete_generation(gen_id: str) -> dict:
+    """Tear down a generated avatar.
+
+    Steps (in order):
+      1. Refuse if any brainstorm session involving this avatar is
+         currently ``status='live'`` — kill the session first.
+      2. Best-effort Runway cleanup: delete the custom character and
+         every attached document. Failures here are reported but do
+         not block local cleanup (the user explicitly asked to delete).
+      3. Delete the local DB row + on-disk image.
+
+    Brainstorm threads / sessions / syntheses that reference this
+    avatar are LEFT INTACT for history. They'll point at a now-missing
+    generation row, and the brainstorm UI shows that as a deleted
+    participant.
+    """
+    rec = storage.get_generation(gen_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="generation not found")
+
+    live = storage.live_brainstorm_sessions_for_avatar(gen_id)
+    if live:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"avatar is currently in a live brainstorm session "
+                f"({', '.join(live)}). End the session before deleting."
+            ),
+        )
+
+    runway_result = avatars.delete_runway_artifacts(gen_id)
+    deleted = storage.delete_generation(gen_id)
+    if not deleted:
+        # Should not happen — we just read the row — but be defensive.
+        raise HTTPException(status_code=404, detail="generation vanished mid-delete")
+
+    log.info(
+        "deleted gen=%s runway_avatar=%s runway_docs=%d/%d errors=%s",
+        gen_id,
+        runway_result.get("avatar_deleted"),
+        runway_result.get("documents_deleted", 0),
+        runway_result.get("documents_total", 0),
+        runway_result.get("errors") or [],
+    )
+    return {
+        "deleted": True,
+        "gen_id": gen_id,
+        "runway": runway_result,
+    }
+
+
 @app.get("/api/generations/by-source/{source_id:path}")
 def by_source(source_id: str) -> dict:
     return {"items": storage.list_generations_for_source(source_id)}
@@ -484,6 +627,16 @@ def serve_image(filename: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="image not found")
     return FileResponse(path)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    """Serve the .ico directly so browser auto-requests for /favicon.ico
+    don't 404 (most browsers fetch this even when <link rel='icon'> is set)."""
+    return FileResponse(
+        ROOT / "static" / "favicon" / "favicon.ico",
+        media_type="image/x-icon",
+    )
 
 
 @app.get("/api/health")

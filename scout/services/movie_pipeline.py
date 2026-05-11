@@ -1,8 +1,8 @@
 """End-to-end movie generation from a brainstorm synthesis row.
 
 Produces a 24-second three-shot mini-movie (8s + 8s + 8s) with each
-character delivering a spoken line, plus a single continuous background
-music track ducked beneath the dialogue.
+character delivering a spoken line. Dialogue only — no music
+underscore (Veo's own ambient room tone is kept).
 
 Pipeline (per ``synthesis_id``):
 
@@ -10,29 +10,25 @@ Pipeline (per ``synthesis_id``):
   2. Ask gpt-5.1 to produce a structured "shoot plan":
         - 3 clips: (Smith solo) → (Scholar solo) → (both together)
         - per-clip composite_prompt + speech_prompt
-        - one music vibe + sfx_prompt + duration
   3. For each clip:
         a. Generate the composite still via gen4_image multi-ref
            (composites/movies services already exist — we just call them).
            Solo clips use 1 reference; duo clip uses both.
         b. Generate the speech-only Veo3.1_fast (audio=True) clip from
            that composite.
-  4. Generate ONE 24-sec sound_effect music track.
-  5. ffmpeg-concat the 3 Veo clips into a 24-sec speech-only video.
-  6. ffmpeg-mix the concat video with the music at MUSIC_DB.
-  7. Persist final MP4 + status fields onto ``brainstorm_synthesis``.
+  4. ffmpeg-concat the 3 Veo clips into the final 24-sec video.
+  5. Persist final MP4 + status fields onto ``brainstorm_synthesis``.
 
 Design notes:
   - Per-clip composites cost 5 credits each (gen4_image @ 1280:720), Veo
-    clips cost 125 each (15 cr/sec × 8 sec + audio surcharge). The music
-    track is essentially free (~9 credits for 24 sec at 1 cr/sec).
-    Total: ~399 credits per finished movie. The user is on a 50k tier.
-  - The music duration is hard-capped to 24s (Veo×3 ceiling) but
-    sound_effect supports up to 30s in a single call.
-  - All intermediate files (composites, per-clip Veo outputs, music
-    track) are kept on disk under ``DATA_DIR/composites`` and
-    ``DATA_DIR/movies`` and ``DATA_DIR/music`` so we can re-mix without
-    re-rendering if the user wants a different music_db.
+    clips cost 125 each (15 cr/sec × 8 sec + audio surcharge).
+    Total: ~390 credits per finished movie. The user is on a 50k tier.
+  - All intermediate files (composites, per-clip Veo outputs) are kept
+    on disk under ``DATA_DIR/composites`` and ``DATA_DIR/movies`` for
+    diagnostics.
+  - The "NO MUSIC AT ALL" instruction baked into each speech_prompt is
+    aimed at Veo (which otherwise tries to invent its own score) — it
+    is unrelated to the now-removed pipeline-level music step. Keep it.
   - On any error, ``brainstorm_synthesis.movie_status='failed'`` and
     ``movie_error`` is populated — the API never raises out of this
     module (callers run it inside a background executor).
@@ -45,14 +41,11 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import requests
 from openai import OpenAI
-from runwayml import RunwayML
 
 from . import composites, movies, storage
 
@@ -69,9 +62,6 @@ VIDEO_MODEL = os.environ.get("MOVIE_VIDEO_MODEL", "veo3.1_fast")
 VIDEO_RATIO = os.environ.get("MOVIE_VIDEO_RATIO", "1280:720")
 VIDEO_DURATION_S = int(os.environ.get("MOVIE_CLIP_DURATION_S", "8"))
 COMPOSITE_RATIO = os.environ.get("MOVIE_COMPOSITE_RATIO", "1280:720")
-MUSIC_DB = float(os.environ.get("MOVIE_MUSIC_DB", "-12"))
-MUSIC_MODEL = os.environ.get("MOVIE_MUSIC_MODEL", "eleven_text_to_sound_v2")
-SOUND_EFFECT_POLL_TIMEOUT_S = int(os.environ.get("MOVIE_SFX_TIMEOUT_S", "180"))
 
 
 # -----------------------------------------------------------------------------
@@ -85,7 +75,7 @@ visual idea.
 You will be given:
   - the brainstorm THREAD context (the optional guide prompt, the
     thread's topic seed)
-  - the SYNTHESIS produced by gpt-5.5 (a deeper idea + movie_pitch +
+  - the SYNTHESIS produced by gpt-5.4 (a deeper idea + movie_pitch +
     structured ideas)
   - both CHARACTERS' personas (name, voice, what they're an expert in,
     a one-paragraph domain summary)
@@ -98,9 +88,6 @@ Plan three 8-second shots in this fixed order:
   3. BOTH characters together (dynamic two-shot). They jointly deliver
      the punchline / movie pitch — either alternating one phrase each,
      or one of them speaks while the other reacts visibly.
-
-Plus one continuous 24-second background music underscore that sits
-beneath all three shots.
 
 Return ONLY one JSON object with this exact shape:
 
@@ -116,36 +103,41 @@ Return ONLY one JSON object with this exact shape:
                            setting/environment, lighting, art style.
                            For solo clips, include only the relevant
                            character's tag. For duo, include both.
-                         speech_prompt: 4-6 sentence prompt for Veo
+                           MUST be ≤ 800 characters.
+                         speech_prompt: 3-5 sentence prompt for Veo
                            3.1 fast. Include the EXACT line(s) of
                            dialogue in quotes. CRITICAL: end with
                            "NO MUSIC AT ALL in the audio. Just clear
                            spoken dialogue plus quiet ambient room
                            tone. Cinematic camera, no on-screen text."
-                       }
-  music         object {
-                         vibe: 1-2 sentence description in plain English,
-                         sfx_prompt: ~30-40 word prompt for the
-                           ElevenLabs sound_effect model. Bias toward
-                           instrumentation + tempo + mood adjectives.
-                           MUST end with "soft background underscore,
-                           low volume, gentle, no melody hook, no
-                           vocals" so the audio model keeps it minimal.
+                           MUST be ≤ 800 characters TOTAL — that
+                           includes the trailing NO MUSIC sentence.
+                           If you can't fit a full description, cut
+                           prose before cutting dialogue. The duo
+                           clip's joint dialogue counts toward the
+                           same 800 char budget.
                        }
 
 Hard rules:
 - Output ONE JSON object, no prose around it, no markdown fences.
-- Music must be POSITIVE (warm/curious/hopeful) unless the synthesis is
-  clearly downbeat.
 - Tags MUST match exactly @{character_a_tag} and @{character_b_tag} —
   use the placeholders given to you in the user message.
 - Each speech_prompt MUST contain the dialogue lines in double quotes
   so Veo speaks them verbatim.
+- LENGTH (Runway hard-rejects ``promptText`` > 1000 chars): every
+  composite_prompt and speech_prompt MUST be ≤ 800 characters. Stay
+  well clear — clip 3's combined two-character dialogue is the most
+  likely offender. Keep prose tight; the dialogue is the priority.
 - Keep all text safe-for-work, no real-person names, no copyrighted IP.
 - If the brainstorm guide / topic seed asks for a specific deliverable
   (e.g. "propose a new web app" or "co-write a screenplay logline"),
   ground the punchline in clip 3 in that deliverable.
 """
+
+# Runway's text_to_image / image_to_video endpoints reject promptText
+# over 1000 chars (HTTP 400 from validation). Leave headroom for tail
+# additions and tag substitution.
+RUNWAY_PROMPT_MAX_CHARS = 990
 
 
 def _openai() -> OpenAI:
@@ -166,16 +158,105 @@ def _parse_plan(raw: str) -> dict:
     obj = json.loads(text[s : e + 1])
     if not isinstance(obj.get("clips"), list) or len(obj["clips"]) != 3:
         raise ValueError("planner must return exactly 3 clips")
-    if not isinstance(obj.get("music"), dict):
-        raise ValueError("planner must return a music object")
     for i, c in enumerate(obj["clips"]):
         for key in ("title", "speaker", "image_strategy", "composite_prompt", "speech_prompt"):
             if not isinstance(c.get(key), str) or not c[key].strip():
                 raise ValueError(f"clip {i} missing field {key!r}")
-    for key in ("vibe", "sfx_prompt"):
-        if not isinstance(obj["music"].get(key), str) or not obj["music"][key].strip():
-            raise ValueError(f"music.{key} missing or empty")
     return obj
+
+
+_NO_MUSIC_RE = re.compile(r"\bNO MUSIC AT ALL\b.*$", re.IGNORECASE | re.DOTALL)
+_FIRST_QUOTE_RE = re.compile(r'(["“„«][^"”’»]{4,}["”’»])', re.DOTALL)
+
+
+def _trim_at_word(text: str, limit: int) -> str:
+    """Hard-truncate at the last whitespace boundary before ``limit``."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    # Try not to break mid-word; back off to the last whitespace.
+    space = cut.rfind(" ")
+    if space > limit * 0.6:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:—-") + "…"
+
+
+def _clamp_speech_prompt(prompt: str, *, limit: int = RUNWAY_PROMPT_MAX_CHARS) -> str:
+    """Keep a Veo speech_prompt under ``limit`` chars while preserving
+    the parts that *must* survive:
+      - the dialogue (first quoted block, the line Veo will actually speak)
+      - the trailing NO MUSIC sentence
+
+    We do this by trimming the descriptive prose between the start and
+    the dialogue (or between the dialogue and the NO MUSIC tail), since
+    that's the lowest-signal segment.
+    """
+    if len(prompt) <= limit:
+        return prompt
+
+    tail_match = _NO_MUSIC_RE.search(prompt)
+    tail = tail_match.group(0) if tail_match else ""
+    body = prompt[: tail_match.start()] if tail_match else prompt
+
+    quote_match = _FIRST_QUOTE_RE.search(body)
+    dialogue = quote_match.group(1) if quote_match else ""
+
+    # If we already exceed the budget without the prose, accept that
+    # — at minimum we need dialogue + tail. Truncate dialogue last.
+    must_keep = (dialogue + " " + tail).strip()
+    if len(must_keep) >= limit:
+        # Pathological: dialogue + tail alone are too long. Hard-trim.
+        return _trim_at_word(must_keep, limit)
+
+    # Budget for the prose around the dialogue.
+    overhead_budget = limit - len(must_keep) - 4  # 4 chars: ellipsis + spacing
+    prefix = body[: quote_match.start()] if quote_match else body
+    suffix = body[quote_match.end():] if quote_match else ""
+
+    # Allocate budget proportionally to original lengths.
+    total_prose = len(prefix) + len(suffix)
+    if total_prose <= overhead_budget:
+        return prompt  # shouldn't happen — len check at top already
+    if total_prose:
+        prefix_budget = max(40, int(overhead_budget * (len(prefix) / total_prose)))
+        suffix_budget = max(0, overhead_budget - prefix_budget)
+    else:
+        prefix_budget, suffix_budget = overhead_budget, 0
+
+    new_prefix = _trim_at_word(prefix, prefix_budget) if prefix else ""
+    new_suffix = _trim_at_word(suffix, suffix_budget) if suffix else ""
+    rebuilt = " ".join(p for p in [new_prefix, dialogue, new_suffix, tail] if p).strip()
+    # Final defensive hard-trim in case our budget math undershot.
+    if len(rebuilt) > limit:
+        rebuilt = _trim_at_word(rebuilt, limit)
+    return rebuilt
+
+
+def _clamp_for_runway(
+    prompt: str,
+    *,
+    kind: str,
+    limit: int = RUNWAY_PROMPT_MAX_CHARS,
+    label: str = "",
+) -> str:
+    """Ensure ``prompt`` fits Runway's promptText limit.
+
+    ``kind`` is one of ``"composite"`` or ``"speech"`` — speech prompts
+    use structure-preserving truncation, composites just tail-trim.
+    Logs a warning when truncation fires so we can spot planner drift.
+    """
+    if len(prompt) <= limit:
+        return prompt
+    if kind == "speech":
+        out = _clamp_speech_prompt(prompt, limit=limit)
+    else:
+        out = _trim_at_word(prompt, limit)
+    log.warning(
+        "%s prompt over Runway limit (%d > %d); truncated to %d chars%s",
+        kind, len(prompt), limit, len(out),
+        f" [{label}]" if label else "",
+    )
+    return out
 
 
 def plan_shoot(
@@ -190,7 +271,7 @@ def plan_shoot(
     """Ask gpt-5.1 for the 3-clip + music plan."""
     user = "\n\n".join(filter(None, [
         f"THREAD GUIDE / TOPIC: {thread.get('topic_seed') or '(none — let the synthesis lead)'}",
-        f"SYNTHESIS (gpt-5.5 output):\n{(synthesis.get('text_md') or synthesis.get('text') or '').strip()}",
+        f"SYNTHESIS (gpt-5.4 output):\n{(synthesis.get('text_md') or synthesis.get('text') or '').strip()}",
         f"MOVIE PITCH (one-line): {(synthesis.get('movie_pitch') or '').strip()}",
         f"IDEAS:\n{json.dumps(synthesis.get('ideas') or [], indent=2)[:4000]}",
         f"CHARACTER A — tag @{tag_a}:\n  name: {avatar_a.get('character_name')}\n  voice: {avatar_a.get('voice_preset')}\n  domain: {(avatar_a.get('domain_summary') or '').strip()}",
@@ -228,81 +309,8 @@ def plan_shoot(
 
 
 # -----------------------------------------------------------------------------
-# Music (sound_effect) + ffmpeg helpers
+# ffmpeg helpers
 # -----------------------------------------------------------------------------
-
-
-def _runway() -> RunwayML:
-    api_key = os.environ.get("RUNWAYML_API_KEY") or os.environ.get(
-        "RUNWAYML_API_SECRET"
-    )
-    if not api_key:
-        raise RuntimeError("RUNWAYML_API_KEY is not set")
-    return RunwayML(api_key=api_key)
-
-
-def generate_music(
-    sfx_prompt: str,
-    duration_s: float,
-    output_path: Path,
-    *,
-    model: str = MUSIC_MODEL,
-    poll_timeout_s: int = SOUND_EFFECT_POLL_TIMEOUT_S,
-) -> dict:
-    client = _runway()
-    log.info(
-        "creating sound_effect task model=%s duration=%.1fs prompt=%r",
-        model, duration_s,
-        sfx_prompt[:140] + ("…" if len(sfx_prompt) > 140 else ""),
-    )
-    task = client.sound_effect.create(
-        model=model,                        # type: ignore[arg-type]
-        prompt_text=sfx_prompt,
-        duration=duration_s,
-    )
-    task_id = getattr(task, "id", None) or "?"
-
-    deadline = time.time() + poll_timeout_s
-    last_status = ""
-    result = None
-    while time.time() < deadline:
-        t = client.tasks.retrieve(task_id)
-        status = getattr(t, "status", None)
-        if status != last_status:
-            log.info("sound_effect %s status=%s", task_id, status)
-            last_status = status or ""
-        if status == "SUCCEEDED":
-            result = t
-            break
-        if status in {"FAILED", "CANCELLED"}:
-            raise RuntimeError(
-                f"sound_effect {status}: {getattr(t, 'failure', None) or status}"
-            )
-        time.sleep(2.0)
-    else:
-        raise TimeoutError(
-            f"sound_effect task {task_id} did not finish within {poll_timeout_s}s"
-        )
-
-    outputs = getattr(result, "output", None) or []
-    if not outputs:
-        raise RuntimeError("sound_effect task succeeded but returned no output URL")
-    output_url = outputs[0] if isinstance(outputs[0], str) else getattr(
-        outputs[0], "url", None
-    )
-    if not output_url:
-        raise RuntimeError(f"could not extract output URL: {outputs!r}")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(output_url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = 0
-        with output_path.open("wb") as fh:
-            for chunk in r.iter_content(chunk_size=64 * 1024):
-                if chunk:
-                    fh.write(chunk)
-                    total += len(chunk)
-    return {"task_id": task_id, "output_url": output_url, "bytes": total}
 
 
 def concat_videos(input_paths: list[Path], output_path: Path) -> None:
@@ -330,34 +338,6 @@ def concat_videos(input_paths: list[Path], output_path: Path) -> None:
             raise RuntimeError(f"ffmpeg concat failed (rc={proc.returncode})")
     finally:
         listfile.unlink(missing_ok=True)
-
-
-def mix_music_into_video(
-    video_path: Path,
-    music_path: Path,
-    output_path: Path,
-    *,
-    music_db: float = MUSIC_DB,
-) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(video_path),
-        "-i", str(music_path),
-        "-filter_complex",
-        f"[1:a]volume={music_db}dB[m];"
-        f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
-        "-map", "0:v", "-map", "[a]",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
-        str(output_path),
-    ]
-    log.info("ffmpeg mix → %s (music %.1f dB under dialogue)", output_path, music_db)
-    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    if proc.returncode != 0:
-        log.error("ffmpeg mix failed (rc=%d):\n%s", proc.returncode, proc.stderr[-2000:])
-        raise RuntimeError(f"ffmpeg mix failed (rc={proc.returncode})")
 
 
 # -----------------------------------------------------------------------------
@@ -474,8 +454,13 @@ def make_movie_for_synthesis(synth_id: str) -> dict:
                     {"path": avatar_a_path, "tag": tag_a},
                     {"path": avatar_b_path, "tag": tag_b},
                 ]
+            composite_prompt = _clamp_for_runway(
+                clip["composite_prompt"],
+                kind="composite",
+                label=f"{synth_id} clip{i+1}",
+            )
             comp = composites.make_composite(
-                refs, clip["composite_prompt"],
+                refs, composite_prompt,
                 ratio=COMPOSITE_RATIO,
             )
             composite_paths.append(comp.output_path)
@@ -484,8 +469,13 @@ def make_movie_for_synthesis(synth_id: str) -> dict:
                 "[%s] clip %d/%d (%s) — Veo %ds (audio, speech only)",
                 synth_id, i + 1, 3, clip["title"], VIDEO_DURATION_S,
             )
+            speech_prompt = _clamp_for_runway(
+                clip["speech_prompt"],
+                kind="speech",
+                label=f"{synth_id} clip{i+1}",
+            )
             clip_result = movies.generate_video(
-                [comp.output_path], clip["speech_prompt"],
+                [comp.output_path], speech_prompt,
                 model=VIDEO_MODEL,
                 duration=VIDEO_DURATION_S,
                 ratio=VIDEO_RATIO,
@@ -495,30 +485,13 @@ def make_movie_for_synthesis(synth_id: str) -> dict:
             clip_paths.append(clip_result.output_path)
             runway_task_ids.append(clip_result.runway_task_id)
 
-        # ---- Step 4: music ----
-        music_dir = storage.DATA_DIR / "music"
-        music_dir.mkdir(parents=True, exist_ok=True)
-        music_path = music_dir / f"{synth_id}_music.mp3"
-        total_duration = VIDEO_DURATION_S * len(clip_paths)
-        log.info(
-            "[%s] generating %ds music underscore",
-            synth_id, total_duration,
-        )
-        generate_music(plan["music"]["sfx_prompt"], float(total_duration), music_path)
-
-        # ---- Step 5: concat clips ----
-        concat_path = movies_dir / f"{synth_id}_concat.mp4"
-        log.info("[%s] concatenating %d clips → %s", synth_id, len(clip_paths), concat_path)
-        concat_videos(clip_paths, concat_path)
-
-        # ---- Step 6: mix music ----
+        # ---- Step 4: concat clips into the final movie ----
         final_path = movies_dir / f"{synth_id}.mp4"
-        log.info("[%s] mixing music at %.1f dB → %s", synth_id, MUSIC_DB, final_path)
-        mix_music_into_video(concat_path, music_path, final_path, music_db=MUSIC_DB)
+        log.info("[%s] concatenating %d clips → %s", synth_id, len(clip_paths), final_path)
+        concat_videos(clip_paths, final_path)
 
-        # Clean up the per-clip + concat-without-music intermediates
-        # (keep composites + bare music for diagnostics).
-        for p in clip_paths + [concat_path]:
+        # Clean up per-clip intermediates (keep composites for diagnostics).
+        for p in clip_paths:
             p.unlink(missing_ok=True)
 
         relname = final_path.name

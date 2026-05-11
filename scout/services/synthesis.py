@@ -1,7 +1,7 @@
 """Thread-level idea synthesis.
 
 The summariser (gpt-5.1) is a record-keeper — it writes per-session
-memory the avatars will read next time. The synthesiser (gpt-5.5) does
+memory the avatars will read next time. The synthesiser (gpt-5.4) does
 the creative leap: given EVERYTHING in a brainstorm thread (rolling
 state + every session's transcript + every session's idea log + both
 personas), produce:
@@ -36,7 +36,7 @@ from . import brainstorm, storage
 
 log = logging.getLogger("scout.synthesis")
 
-DEFAULT_MODEL = os.environ.get("SYNTHESIS_MODEL", "gpt-5.5")
+DEFAULT_MODEL = os.environ.get("SYNTHESIS_MODEL", "gpt-5.4")
 FALLBACK_MODELS = ["gpt-5.2", "gpt-5", "gpt-4.1", "gpt-4o"]
 
 # We're feeding it the WHOLE thread, so allow more context than the
@@ -172,7 +172,7 @@ def _parse_output(raw: str) -> dict:
 
 
 def synthesise_thread(thread_id: str) -> dict:
-    """Run the gpt-5.5 synthesiser and append a brainstorm_synthesis row."""
+    """Run the gpt-5.4 synthesiser and append a brainstorm_synthesis row."""
     thread = brainstorm.get_thread(thread_id)
     if not thread:
         raise LookupError(f"thread {thread_id} not found")

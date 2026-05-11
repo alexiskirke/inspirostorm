@@ -116,7 +116,7 @@ def init_db() -> None:
                 version            INTEGER NOT NULL DEFAULT 0
             );
 
-            -- Big creative outputs (gpt-5.5 thread synthesis + movie pitch).
+            -- Big creative outputs (gpt-5.4 thread synthesis + movie pitch).
             -- Multiple per thread are allowed (re-syntheses, refinements).
             CREATE TABLE IF NOT EXISTS brainstorm_synthesis (
                 id                 TEXT PRIMARY KEY,
@@ -332,3 +332,99 @@ def save_image_bytes(gen_id: str, content: bytes, ext: str = "png") -> str:
     filename = f"{gen_id}.{safe_ext}"
     (IMAGES_DIR / filename).write_bytes(content)
     return filename
+
+
+def reset_brainstorm() -> dict:
+    """Wipe ALL brainstorm history: threads, sessions, rolling memory,
+    syntheses, and the per-synthesis movie + composite files on disk.
+
+    Does NOT touch the ``generations`` table (the avatars themselves —
+    those took GPT calls and Runway credits to make and the user almost
+    certainly wants to keep them). Does NOT touch the Runway-side
+    custom avatars or attached documents.
+
+    Idempotent. Returns a dict of how many rows / files were removed.
+    Safe to call mid-build: in-flight movie pipelines will see their
+    synthesis row vanish and their final UPDATE will be a no-op.
+    """
+    counts = {
+        "threads": 0,
+        "sessions": 0,
+        "state_rows": 0,
+        "syntheses": 0,
+        "movies_deleted": 0,
+        "composites_deleted": 0,
+    }
+    with _LOCK, _connect() as conn:
+        for table, key in [
+            ("brainstorm_threads",   "threads"),
+            ("brainstorm_sessions",  "sessions"),
+            ("brainstorm_state",     "state_rows"),
+            ("brainstorm_synthesis", "syntheses"),
+        ]:
+            row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            counts[key] = row["n"] if row else 0
+            conn.execute(f"DELETE FROM {table}")
+    # Per-synthesis files on disk. Every .mp4 in MOVIES_DIR is a synthesis
+    # output, and every .png in DATA_DIR/composites is a clip composite.
+    composites_dir = DATA_DIR / "composites"
+    for d, ext, key in [
+        (MOVIES_DIR, ".mp4", "movies_deleted"),
+        (composites_dir, ".png", "composites_deleted"),
+    ]:
+        if not d.exists():
+            continue
+        for f in d.iterdir():
+            if f.is_file() and f.suffix.lower() == ext:
+                try:
+                    f.unlink()
+                    counts[key] += 1
+                except Exception:
+                    pass
+    return counts
+
+
+def live_brainstorm_sessions_for_avatar(gen_id: str) -> list[str]:
+    """Return session ids that are currently ``status='live'`` and have
+    this avatar in either slot. Used by the delete endpoint to refuse
+    teardown while a brainstorm is mid-flight."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.id
+              FROM brainstorm_sessions s
+              JOIN brainstorm_threads t ON t.id = s.thread_id
+             WHERE s.status = 'live'
+               AND (t.avatar_a_gen_id = ? OR t.avatar_b_gen_id = ?)
+            """,
+            (gen_id, gen_id),
+        ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def delete_generation(gen_id: str) -> Optional[dict]:
+    """Remove a generation row + its on-disk image file.
+
+    Returns the deleted record (in the same shape as ``get_generation``)
+    or ``None`` if no row with that id existed. Brainstorm threads /
+    sessions / syntheses that reference this avatar are LEFT INTACT —
+    they'll have a dangling reference, which the UI handles by showing
+    the missing participant as "(avatar deleted)".
+
+    Runway-side artifacts (custom character, attached documents) are
+    NOT cleaned up here — call ``avatars.delete_runway_artifacts``
+    first if you want a full teardown.
+    """
+    rec = get_generation(gen_id)
+    if not rec:
+        return None
+    image_path = rec.get("image_path")
+    if image_path:
+        file = IMAGES_DIR / image_path
+        try:
+            file.unlink(missing_ok=True)
+        except Exception:
+            pass
+    with _LOCK, _connect() as conn:
+        conn.execute("DELETE FROM generations WHERE id = ?", (gen_id,))
+    return rec
